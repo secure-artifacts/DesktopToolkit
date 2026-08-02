@@ -1,0 +1,269 @@
+"""Bottom-right floating robot assistant with hover quick-launch menu."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from PyQt6.QtCore import QPoint, Qt, QTimer, QSize
+from PyQt6.QtGui import QCursor, QGuiApplication, QIcon, QMouseEvent, QPixmap
+from PyQt6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from skin import bundle_root
+
+
+def robot_icon_path() -> Path:
+    for name in ("robot_assistant.png", "robot_assistant.jpg", "logo.png"):
+        p = bundle_root() / "assets" / name
+        if p.is_file():
+            return p
+        p2 = bundle_root() / name
+        if p2.is_file():
+            return p2
+    return bundle_root() / "logo.png"
+
+
+class FloatingAssistant(QWidget):
+    """Desktop robot logo (bottom-right). Hover shows tool shortcuts."""
+
+    def __init__(self, host, parent=None):
+        super().__init__(parent)
+        self.host = host
+        self._drag = False
+        self._drag_offset = QPoint()
+        self._menu_visible = False
+        self.setWindowTitle("Toolkit Assistant")
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(78, 78)
+
+        # Pure transparent — no circle, no white plate
+        self.icon_lbl = QLabel(self)
+        self.icon_lbl.setFixedSize(78, 78)
+        self.icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.icon_lbl.setStyleSheet(
+            "QLabel { background: transparent; border: none; }"
+        )
+        path = robot_icon_path()
+        if path.is_file():
+            pix = QPixmap(str(path))
+            # Prefer smooth scaled transparent PNG
+            pix = pix.scaled(
+                74,
+                74,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.icon_lbl.setPixmap(pix)
+            self.setWindowIcon(QIcon(str(path)))
+        else:
+            self.icon_lbl.setText("🤖")
+            self.icon_lbl.setStyleSheet(
+                "QLabel { background: transparent; border: none; font-size: 36px; }"
+            )
+
+        # Hover menu (separate top-level so it can sit above logo)
+        self.menu = QFrame(None)
+        self.menu.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.menu.setStyleSheet(
+            """
+            QFrame#assistMenu {
+                background: rgba(15,23,42,0.96);
+                border: 1px solid #6366f1;
+                border-radius: 14px;
+            }
+            QLabel#assistTitle {
+                color: #a5b4fc; font-weight: 800; font-size: 12px; padding: 2px 4px;
+            }
+            QPushButton {
+                background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+                border-radius: 8px; padding: 8px 12px; text-align: left;
+                font-weight: 700; font-size: 12px;
+            }
+            QPushButton:hover {
+                background: #6366f1; color: white; border-color: #818cf8;
+            }
+            """
+        )
+        self.menu.setObjectName("assistMenu")
+        shell = QFrame(self.menu)
+        shell.setObjectName("assistMenu")
+        outer = QVBoxLayout(self.menu)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(shell)
+        ml = QVBoxLayout(shell)
+        ml.setContentsMargins(10, 10, 10, 10)
+        ml.setSpacing(4)
+        title = QLabel("快捷工具")
+        title.setObjectName("assistTitle")
+        ml.addWidget(title)
+
+        items = [
+            ("待办事项", self._act_todos),
+            ("便签", self._act_notes),
+            ("番茄钟", self._act_pomo),
+            ("闹钟", self._act_alarm),
+            ("区域截图", self._act_shot),
+            ("录屏", self._act_record),
+            ("音乐播放器", self._act_music),
+            ("清理电脑（立即执行）", self._act_clean),
+            ("打开主界面", self._act_hub),
+        ]
+        for text, slot in items:
+            b = QPushButton(text)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.clicked.connect(slot)
+            ml.addWidget(b)
+        self.menu.adjustSize()
+        self.menu.hide()
+
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._maybe_hide_menu)
+
+        self._place_bottom_right()
+        self.show()
+
+    def _place_bottom_right(self) -> None:
+        scr = QGuiApplication.primaryScreen()
+        if not scr:
+            return
+        g = scr.availableGeometry()
+        # user: 桌面右下角
+        self.move(g.right() - self.width() - 18, g.bottom() - self.height() - 18)
+
+    def _position_menu(self) -> None:
+        self.menu.adjustSize()
+        # Open upward-left from logo
+        x = self.x() + self.width() - self.menu.width()
+        y = self.y() - self.menu.height() - 8
+        scr = QGuiApplication.primaryScreen()
+        if scr:
+            g = scr.availableGeometry()
+            x = max(g.left() + 8, min(x, g.right() - self.menu.width() - 8))
+            y = max(g.top() + 8, y)
+        self.menu.move(x, y)
+
+    def enterEvent(self, event) -> None:  # type: ignore[override]
+        self._show_menu()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[override]
+        self._hide_timer.start(280)
+        super().leaveEvent(event)
+
+    def _show_menu(self) -> None:
+        self._hide_timer.stop()
+        self._position_menu()
+        self.menu.show()
+        self.menu.raise_()
+        self._menu_visible = True
+        # Keep menu open while cursor is on menu
+        self.menu.enterEvent = lambda e: self._hide_timer.stop()  # type: ignore
+        self.menu.leaveEvent = lambda e: self._hide_timer.start(220)  # type: ignore
+
+    def _maybe_hide_menu(self) -> None:
+        pos = QCursor.pos()
+        if self.frameGeometry().contains(pos):
+            return
+        if self.menu.isVisible() and self.menu.frameGeometry().contains(pos):
+            return
+        self.menu.hide()
+        self._menu_visible = False
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag = True
+            self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._show_menu()
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:
+        if self._drag and e.buttons() & Qt.MouseButton.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+            if self.menu.isVisible():
+                self._position_menu()
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        self._drag = False
+
+    def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:
+        self._act_hub()
+
+    # --- actions ---
+    def _tip(self, msg: str) -> None:
+        try:
+            self.host.announce(msg)
+        except Exception:
+            pass
+
+    def _act_todos(self) -> None:
+        self._tip("打开待办事项")
+        self.host.show_todos()
+        self.menu.hide()
+
+    def _act_notes(self) -> None:
+        self._tip("打开便签")
+        self.host.show_notes()
+        self.menu.hide()
+
+    def _act_pomo(self) -> None:
+        self._tip("打开番茄钟")
+        self.host.show_pomodoro()
+        self.menu.hide()
+
+    def _act_alarm(self) -> None:
+        self._tip("打开闹钟")
+        self.host.show_alarm_board()
+        self.menu.hide()
+
+    def _act_shot(self) -> None:
+        self._tip("开始区域截图")
+        self.host.start_screenshot_region()
+        self.menu.hide()
+
+    def _act_record(self) -> None:
+        self._tip("打开录屏")
+        # Prefer embedded page if hub open; still show floating settings
+        try:
+            self.host.show_hub()
+            if self.host.main_win:
+                self.host.main_win.goto("record")
+        except Exception:
+            self.host.show_recorder_board()
+        self.menu.hide()
+
+    def _act_music(self) -> None:
+        self._tip("打开音乐播放器")
+        try:
+            self.host.show_hub()
+            if self.host.main_win:
+                self.host.main_win.goto("music")
+        except Exception:
+            self.host.show_music_player()
+        self.menu.hide()
+
+    def _act_clean(self) -> None:
+        self._tip("开始清理电脑")
+        # 直接执行，不进设置页
+        self.host.start_deep_clean()
+        self.menu.hide()
+
+    def _act_hub(self) -> None:
+        self._tip("打开主界面")
+        self.host.show_hub()
+        self.menu.hide()

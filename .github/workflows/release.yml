@@ -1,0 +1,75 @@
+# Secure release for Desktop Toolkit (PyInstaller Windows portable)
+# Docs: https://tpscsm-docs.pages.dev/ai/ + workflow-example (PyInstaller)
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(.+)$') { throw "Tag must look like vX.Y.Z" }
+          "version=$($Matches[1])" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm DesktopToolkit.spec
+          if (-not (Test-Path "dist\DesktopToolkit\DesktopToolkit.exe")) {
+            throw "Build failed: dist\DesktopToolkit\DesktopToolkit.exe missing"
+          }
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $releaseDir = Join-Path $PWD "release-assets"
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          $zipName = "DesktopToolkit-$version-windows-portable.zip"
+          $zipPath = Join-Path $releaseDir $zipName
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Compress-Archive -Path "dist\DesktopToolkit\*" -DestinationPath $zipPath -Force
+          Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $zipName" } |
+            Set-Content -Path (Join-Path $releaseDir "DesktopToolkit-$version-windows-portable.sha256") -Encoding utf8
+          Get-ChildItem $releaseDir | Format-Table Name, Length
+
+      - name: Attest Build Provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: "release-assets/*"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          make_latest: true

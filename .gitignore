@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.log
+
+# PyInstaller / release
+build/
+dist/
+release-assets/
+*.spec.bak
+
+# Local state / secrets
+state.json
+*.tmp
+client_secrets*.json
+token*.json
+credentials*.json
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Tool extracts
+tools/pyinstaller_template.yml
+tools/extract_wf.py
+tools/
+
+# Cloudflare local
+cloudflare/.wrangler/
+cloudflare/node_modules/
+
+# Error dumps
+DesktopToolkit-error.log
