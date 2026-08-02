@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QSize, QUrl
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -106,7 +107,12 @@ class MainWindow(QMainWindow):
                 sl.addWidget(b)
                 self._nav_btns[key] = b
         sl.addStretch(1)
-        ver = QLabel("v1.0.5")
+        try:
+            from updater import APP_VERSION as _VER
+
+            ver = QLabel(f"v{_VER}")
+        except Exception:
+            ver = QLabel("v1.0.6")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -275,6 +281,10 @@ class MainWindow(QMainWindow):
         act.addWidget(b2)
         act.addStretch(1)
         lay.addLayout(act)
+        tip_shot = QLabel("标注时：鼠标滚轮可快速调节画笔粗细（1–40），工具条 +/- 同样可用。")
+        tip_shot.setObjectName("muted")
+        tip_shot.setWordWrap(True)
+        lay.addWidget(tip_shot)
 
         panel = QFrame(objectName="panel")
         rl = QVBoxLayout(panel)
@@ -547,6 +557,34 @@ class MainWindow(QMainWindow):
         lay.addWidget(
             QLabel("Ctrl+Alt+T 主窗口 · 截图快捷键在「截图」页设置", objectName="muted")
         )
+
+        lay.addWidget(QLabel("版本与更新", objectName="section"))
+        try:
+            from updater import APP_VERSION
+
+            ver_txt = APP_VERSION
+        except Exception:
+            ver_txt = "1.0.5"
+        self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
+        self.lbl_app_version.setObjectName("muted")
+        lay.addWidget(self.lbl_app_version)
+        upd_row = QHBoxLayout()
+        self.btn_check_update = QPushButton("检查更新", objectName="primary")
+        self.btn_check_update.clicked.connect(self._check_update)
+        self.btn_open_release = QPushButton("打开下载页", objectName="soft")
+        self.btn_open_release.setEnabled(False)
+        self.btn_open_release.clicked.connect(self._open_release_page)
+        upd_row.addWidget(self.btn_check_update)
+        upd_row.addWidget(self.btn_open_release)
+        upd_row.addStretch(1)
+        lay.addLayout(upd_row)
+        self.lbl_update_status = QLabel("点击「检查更新」查询 GitHub 最新版本。")
+        self.lbl_update_status.setObjectName("muted")
+        self.lbl_update_status.setWordWrap(True)
+        lay.addWidget(self.lbl_update_status)
+        self._last_release_url = ""
+        self._last_download_url = ""
+
         lay.addStretch(1)
         self.apply_theme()
         return body
@@ -598,3 +636,51 @@ class MainWindow(QMainWindow):
             self.lbl_prefs_status.setText("正在试听…")
         except Exception as e:
             self.lbl_prefs_status.setText(f"试听失败：{e}")
+
+    def _check_update(self) -> None:
+        self.btn_check_update.setEnabled(False)
+        self.lbl_update_status.setText("正在检查更新…")
+        try:
+            from updater import check_for_update
+
+            result = check_for_update()
+        except Exception as e:
+            result = None
+            self.lbl_update_status.setText(f"检查失败：{e}")
+            self.btn_check_update.setEnabled(True)
+            return
+        self.btn_check_update.setEnabled(True)
+        if result is None:
+            return
+        self.lbl_update_status.setText(result.message)
+        self._last_release_url = result.release_url or ""
+        self._last_download_url = result.download_url or result.release_url or ""
+        self.btn_open_release.setEnabled(bool(self._last_download_url or self._last_release_url))
+        if result.ok and result.has_update:
+            box = QMessageBox(self)
+            box.setWindowTitle("发现新版本")
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(result.message)
+            box.setInformativeText("是否打开下载页面？")
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Yes)
+            if box.exec() == QMessageBox.StandardButton.Yes:
+                self._open_release_page()
+        elif result.ok:
+            try:
+                self.host.announce(result.message)
+            except Exception:
+                pass
+
+    def _open_release_page(self) -> None:
+        url = self._last_download_url or self._last_release_url
+        if not url:
+            try:
+                from updater import RELEASES_PAGE
+
+                url = RELEASES_PAGE
+            except Exception:
+                return
+        QDesktopServices.openUrl(QUrl(url))

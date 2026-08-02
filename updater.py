@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 
 # Bump when shipping a new installer.
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 # Public releases channel (organization repo — no personal account)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -58,13 +58,25 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
     tag = str(payload.get("tag_name") or payload.get("name") or "").strip()
     latest = tag.lstrip("vV")
     html_url = str(payload.get("html_url") or RELEASES_PAGE)
+    # Prefer setup.exe, then portable zip, then any asset
     download = ""
+    candidates: list[tuple[int, str]] = []
     for asset in payload.get("assets") or []:
         name = str(asset.get("name") or "").lower()
         url = str(asset.get("browser_download_url") or "")
-        if url and ("setup" in name or name.endswith(".exe") or name.endswith(".7z") or name.endswith(".zip")):
-            download = url
-            break
+        if not url:
+            continue
+        if "setup" in name and name.endswith(".exe"):
+            candidates.append((0, url))
+        elif name.endswith(".exe"):
+            candidates.append((1, url))
+        elif "portable" in name and name.endswith(".zip"):
+            candidates.append((2, url))
+        elif name.endswith(".zip") or name.endswith(".7z"):
+            candidates.append((3, url))
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        download = candidates[0][1]
     if not download:
         download = html_url
 

@@ -321,8 +321,30 @@ class ScreenshotEditor(QWidget):
 
     def _set_width(self, w: int) -> None:
         self.pen_w = max(1, min(40, int(w)))
-        self._status_hint = f"粗细 {self.pen_w}"
+        self._status_hint = f"粗细 {self.pen_w} · 滚轮可调"
+        if self.phase == "edit":
+            self._rebuild_dock()
         self.update()
+
+    def wheelEvent(self, e: QWheelEvent) -> None:  # type: ignore[override]
+        """Mouse wheel adjusts brush thickness (edit mode)."""
+        if self.phase != "edit":
+            super().wheelEvent(e)
+            return
+        # Prefer vertical angleDelta; fall back to pixelDelta for trackpads
+        delta = int(e.angleDelta().y())
+        if delta == 0:
+            delta = int(e.pixelDelta().y())
+        if delta == 0:
+            e.accept()
+            return
+        # One notch ≈ 120; multi-notch or trackpad swipe scales a bit
+        step = max(1, min(4, abs(delta) // 120 or 1))
+        if delta > 0:
+            self._set_width(self.pen_w + step)
+        else:
+            self._set_width(self.pen_w - step)
+        e.accept()
 
     def _enter_edit_mode(self) -> None:
         """Lock selection and enable continuous multi-tool annotation."""
@@ -331,7 +353,7 @@ class ScreenshotEditor(QWidget):
         self.drawing = False
         self.cur_stroke = None
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self._status_hint = "点选区周边工具切换 · 在框内绘制 · 完成/取消在工具条上"
+        self._status_hint = "滚轮调粗细 · 点工具切换 · 在框内绘制 · 完成/取消在工具条"
         self._rebuild_dock()
         self.setFocus()
         self.update()
