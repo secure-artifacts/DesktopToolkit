@@ -1,5 +1,5 @@
 /**
- * QuakerParrotPet — zero-storage WebSocket signaling + chunk relay Worker
+ * Desktop Toolkit — zero-storage WebSocket signaling + chunk relay Worker
  *
  * Deploy (Cloudflare free):
  *   1. npx wrangler login
@@ -31,7 +31,7 @@ export default {
       ctx.waitUntil(bumpDayCounter());
       return json({
         ok: true,
-        name: "quaker-parrot-p2p-signaling",
+        name: "desktop-toolkit-p2p-signaling",
         storage: "none",
         usage: "WebSocket ws(s)://<host>/ws?room=ROOMCODE",
         endpoints: {

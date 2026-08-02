@@ -31,7 +31,7 @@ DEFAULT_STATE: dict[str, Any] = {
             "enabled": False,
             "client_secrets_path": "",
             "folder_id": "",
-            "folder_name": "桌面工具截图",
+            "folder_name": "ToolkitShots",
             "use_full_scope": False,
         },
     },

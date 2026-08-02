@@ -24,7 +24,7 @@ def _uid() -> str:
 
 def _user_data_root() -> Path:
     base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
-    root = Path(base) / "QuakerParrotPet"
+    root = Path(base) / "DesktopToolkit"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

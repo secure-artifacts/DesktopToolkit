@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
                 sl.addWidget(b)
                 self._nav_btns[key] = b
         sl.addStretch(1)
-        ver = QLabel("v1.0.4")
+        ver = QLabel("v1.0.5")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)

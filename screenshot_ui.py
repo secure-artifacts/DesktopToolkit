@@ -326,7 +326,7 @@ class FloatingScreenshotBoard(QWidget):
 
         gl.addWidget(QLabel("自动创建文件夹名（无 ID 时）"))
         self.txt_folder_name = QLineEdit()
-        self.txt_folder_name.setPlaceholderText("桌宠截图")
+        self.txt_folder_name.setPlaceholderText("ToolkitShots")
         gl.addWidget(self.txt_folder_name)
 
         grow = QHBoxLayout()
@@ -370,7 +370,7 @@ class FloatingScreenshotBoard(QWidget):
         self.chk_gdrive.setChecked(bool(gd.get("enabled", False)))
         self.txt_secrets.setText(str(gd.get("client_secrets_path") or ""))
         self.txt_folder_id.setText(str(gd.get("folder_id") or ""))
-        self.txt_folder_name.setText(str(gd.get("folder_name") or "桌宠截图"))
+        self.txt_folder_name.setText(str(gd.get("folder_name") or "ToolkitShots"))
         self.chk_full_scope.setChecked(bool(gd.get("use_full_scope")))
         self._refresh_gstatus()
         self._update_tip_hotkeys()
@@ -410,7 +410,7 @@ class FloatingScreenshotBoard(QWidget):
         gd["enabled"] = self.chk_gdrive.isChecked()
         gd["client_secrets_path"] = self.txt_secrets.text().strip()
         gd["folder_id"] = self.txt_folder_id.text().strip()
-        gd["folder_name"] = self.txt_folder_name.text().strip() or "桌宠截图"
+        gd["folder_name"] = self.txt_folder_name.text().strip() or "ToolkitShots"
         gd["use_full_scope"] = self.chk_full_scope.isChecked()
         try:
             if self.callbacks and hasattr(self.callbacks, "save_state"):

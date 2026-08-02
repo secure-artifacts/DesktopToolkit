@@ -80,7 +80,7 @@ class GoogleDriveClient:
         import os
 
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-        return Path(base) / "QuakerParrotPet" / "gdrive_token.json"
+        return Path(base) / "DesktopToolkit" / "gdrive_token.json"
 
     def load_token(self) -> dict | None:
         path = self.token_path()
@@ -144,7 +144,7 @@ class GoogleDriveClient:
                 self.end_headers()
                 self.wfile.write(
                     "<html><body style='font-family:sans-serif;padding:40px'>"
-                    "<h2>授权完成</h2><p>可以关闭此窗口，返回桌宠应用。</p>"
+                    "<h2>授权完成</h2><p>可以关闭此窗口，返回应用。</p>"
                     "</body></html>".encode("utf-8")
                 )
 
@@ -246,7 +246,7 @@ class GoogleDriveClient:
         fid = (self.cfg.get("folder_id") or "").strip()
         if fid:
             return fid
-        name = (self.cfg.get("folder_name") or "桌宠截图").strip() or "桌宠截图"
+        name = (self.cfg.get("folder_name") or "ToolkitShots").strip() or "ToolkitShots"
         # Search existing (drive.file may only see app-created)
         q = (
             f"name = '{name.replace(chr(39), chr(92) + chr(39))}' "

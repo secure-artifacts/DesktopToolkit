@@ -9,9 +9,9 @@ import urllib.request
 from dataclasses import dataclass
 
 # Bump when shipping a new installer.
-APP_VERSION = "1.0.0"
-# Optional update channel (can point to your tools releases later).
-GITHUB_REPO = "christiancagfr-alt/pet-music-bianq"
+APP_VERSION = "1.0.5"
+# Public releases channel (organization repo — no personal account)
+GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 
@@ -39,7 +39,7 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
     current = APP_VERSION
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": f"QuakerParrotPet/{APP_VERSION}",
+        "User-Agent": f"DesktopToolkit/{APP_VERSION}",
     }
     try:
         req = urllib.request.Request(RELEASES_API, headers=headers)

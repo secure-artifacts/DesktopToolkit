@@ -40,3 +40,7 @@ cloudflare/node_modules/
 
 # Error dumps
 DesktopToolkit-error.log
+
+# Local release notes / private drafts
+RELEASE-NOTES*.md
+

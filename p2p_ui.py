@@ -123,7 +123,7 @@ class FloatingP2PBoard(QWidget):
 
         lay.addWidget(QLabel("中转地址（Cloudflare Worker）"))
         self.txt_url = QLineEdit()
-        self.txt_url.setPlaceholderText("wss://quaker-parrot-p2p.xxx.workers.dev")
+        self.txt_url.setPlaceholderText("wss://your-worker.example.workers.dev")
         from p2p_transfer import DEFAULT_SIGNAL_URL
 
         if DEFAULT_SIGNAL_URL:
@@ -213,8 +213,9 @@ class FloatingP2PBoard(QWidget):
 
         help_l = QLabel(
             "部署：在 cloudflare/ 目录执行 wrangler deploy，把输出的 *.workers.dev 填到上方。\n"
-            "发送方：生成房间号 → 点发送 → 把房间号告诉对方。\n"
-            "接收方：填同一地址+房间号 → 点等待接收 → 自动收文件。"
+            "正确顺序（推荐）：双方先填同一中转地址 + 同一房间号 → "
+            "接收方先点「等待接收」→ 发送方再点「发送文件」。\n"
+            "若提示等待超时：检查房间号/地址是否一致、双方是否都已点按钮、网络是否拦截 WebSocket。"
         )
         help_l.setObjectName("muted")
         help_l.setWordWrap(True)

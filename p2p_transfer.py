@@ -34,8 +34,8 @@ except Exception:
     ws_connect = None
 
 
-# Deployed worker (zero-storage signaling / chunk relay)
-DEFAULT_SIGNAL_URL = "wss://quaker-parrot-p2p.christiancag-fr.workers.dev"
+# User-configured Worker URL (leave empty — fill in app settings after self-deploy)
+DEFAULT_SIGNAL_URL = ""
 CHUNK = 256 * 1024  # 256 KiB
 # Cloudflare Workers Free plan (account-wide, shared across all Workers)
 FREE_DAILY_REQUEST_LIMIT = 100_000
@@ -92,7 +92,7 @@ def fetch_worker_usage(signal_url: str, timeout: float = 8.0) -> dict:
     base = normalize_http_base(signal_url)
     req = urllib.request.Request(
         f"{base}/usage",
-        headers={"Accept": "application/json", "User-Agent": "QuakerParrotPet-P2P/1.0"},
+        headers={"Accept": "application/json", "User-Agent": "DesktopToolkit-P2P/1.0"},
         method="GET",
     )
     try:
@@ -188,34 +188,50 @@ class P2PSession:
         sha = hashlib.sha1()
         self.on_status(f"连接中转… 房间 {self.room}")
         try:
-            with ws_connect(url, open_timeout=15, max_size=CHUNK * 4) as ws:
-                ws.send(json.dumps({"type": "hello", "role": "send", "name": path.name}))
-                self.on_status("已进入房间，等待对方接收…")
-                # Wait for peer hello / accept
+            with ws_connect(url, open_timeout=20, max_size=CHUNK * 4) as ws:
+                hello = json.dumps({"type": "hello", "role": "send", "name": path.name})
+                offer = json.dumps(
+                    {
+                        "type": "offer",
+                        "name": path.name,
+                        "size": size,
+                        "chunks": total,
+                    }
+                )
+                ws.send(hello)
+                self.on_status(
+                    f"已进入房间 {self.room}，等待对方点「等待接收」…\n"
+                    "请确认双方中转地址与房间号完全一致。"
+                )
+                # Wait for peer hello / accept. Re-hello periodically so late joiners work.
                 peer_ready = False
-                for _ in range(600):  # ~60s
+                offer_sent = False
+                for i in range(1800):  # ~3 min (0.1s * 1800)
                     if self._stop.is_set():
                         return
+                    # every ~2s re-announce so receiver who joined first still pairs
+                    if i % 20 == 0:
+                        try:
+                            ws.send(hello)
+                            if offer_sent:
+                                ws.send(offer)
+                        except Exception:
+                            pass
                     try:
                         msg = ws.recv(timeout=0.1)
                     except Exception:
                         continue
                     if isinstance(msg, bytes):
                         continue
-                    data = json.loads(msg)
+                    try:
+                        data = json.loads(msg)
+                    except Exception:
+                        continue
                     t = data.get("type")
                     if t == "hello" and data.get("role") == "recv":
-                        ws.send(
-                            json.dumps(
-                                {
-                                    "type": "offer",
-                                    "name": path.name,
-                                    "size": size,
-                                    "chunks": total,
-                                }
-                            )
-                        )
-                        self.on_status("已发送文件信息，等待对方确认…")
+                        ws.send(offer)
+                        offer_sent = True
+                        self.on_status("已发现接收方，已发送文件信息，等待确认…")
                     elif t == "accept":
                         peer_ready = True
                         break
@@ -223,10 +239,19 @@ class P2PSession:
                         self.on_status("对方拒绝接收")
                         return
                     elif t == "hello" and data.get("role") == "send":
-                        self.on_status("房间里已有发送方，请换房间号")
+                        self.on_status("房间里已有另一个发送方，请换一个房间号")
                         return
+                    elif t == "ping":
+                        try:
+                            ws.send(json.dumps({"type": "pong"}))
+                        except Exception:
+                            pass
                 if not peer_ready:
-                    self.on_status("等待对方超时")
+                    self.on_status(
+                        "等待对方超时（约 3 分钟）。\n"
+                        "请检查：①双方房间号是否相同 ②中转地址是否相同 "
+                        "③对方是否已点「等待接收」④网络/防火墙是否拦截 WebSocket。"
+                    )
                     return
 
                 self.on_status(f"开始发送 {path.name} ({size} 字节)")
@@ -244,7 +269,14 @@ class P2PSession:
                 ws.send(json.dumps({"type": "done", "sha1": sha.hexdigest()}))
                 self.on_status(f"✅ 发送完成：{path.name}")
         except Exception as exc:
-            self.on_status(f"发送失败：{exc}")
+            err = str(exc)
+            if "timed out" in err.lower() or "timeout" in err.lower():
+                self.on_status(
+                    f"连接中转超时：{exc}\n"
+                    "请检查中转地址是否可访问（wss://…workers.dev），以及本机网络/代理。"
+                )
+            else:
+                self.on_status(f"发送失败：{exc}")
 
     def _recv_file(self, dest_dir: Path) -> None:
         if ws_connect is None:
@@ -254,28 +286,54 @@ class P2PSession:
         url = normalize_ws_url(self.signal_url, self.room)
         self.on_status(f"连接中转… 房间 {self.room}")
         try:
-            with ws_connect(url, open_timeout=15, max_size=CHUNK * 4) as ws:
-                ws.send(json.dumps({"type": "hello", "role": "recv"}))
-                self.on_status("已进入房间，等待对方发来文件…")
+            with ws_connect(url, open_timeout=20, max_size=CHUNK * 4) as ws:
+                hello = json.dumps({"type": "hello", "role": "recv"})
+                ws.send(hello)
+                self.on_status(
+                    f"已进入房间 {self.room}，等待对方发送文件…\n"
+                    "请确认双方中转地址与房间号完全一致。"
+                )
                 offer = None
-                for _ in range(600):
+                for i in range(1800):  # ~3 min
                     if self._stop.is_set():
                         return
+                    # re-hello so sender who joined earlier still sees us
+                    if i % 20 == 0:
+                        try:
+                            ws.send(hello)
+                        except Exception:
+                            pass
                     try:
                         msg = ws.recv(timeout=0.1)
                     except Exception:
                         continue
                     if isinstance(msg, bytes):
                         continue
-                    data = json.loads(msg)
-                    if data.get("type") == "offer":
+                    try:
+                        data = json.loads(msg)
+                    except Exception:
+                        continue
+                    t = data.get("type")
+                    if t == "offer":
                         offer = data
                         break
-                    if data.get("type") == "hello" and data.get("role") == "send":
-                        # wait for offer
+                    if t == "hello" and data.get("role") == "send":
+                        # 发送方先到时：再发一次 hello，触发对方回 offer
+                        try:
+                            ws.send(hello)
+                        except Exception:
+                            pass
+                        self.on_status("已发现发送方，等待文件信息…")
                         continue
+                    if t == "hello" and data.get("role") == "recv":
+                        self.on_status("房间里已有另一个接收方，请换一个房间号")
+                        return
                 if not offer:
-                    self.on_status("等待文件信息超时")
+                    self.on_status(
+                        "等待文件信息超时（约 3 分钟）。\n"
+                        "请检查：①双方房间号是否相同 ②中转地址是否相同 "
+                        "③对方是否已点「发送文件」④网络是否正常。"
+                    )
                     return
                 name = Path(str(offer.get("name") or "received.bin")).name
                 size = int(offer.get("size") or 0)
@@ -295,9 +353,12 @@ class P2PSession:
                         if self._stop.is_set():
                             return
                         try:
-                            meta_raw = ws.recv(timeout=30)
+                            meta_raw = ws.recv(timeout=60)
                         except Exception as exc:
-                            self.on_status(f"接收中断：{exc}")
+                            self.on_status(
+                                f"接收中断：{exc}\n"
+                                "可能是网络不稳、对方取消，或中转连接断开。请双方重试。"
+                            )
                             return
                         if isinstance(meta_raw, bytes):
                             # unexpected binary without meta
@@ -316,7 +377,7 @@ class P2PSession:
                         if t != "chunk":
                             continue
                         try:
-                            blob = ws.recv(timeout=30)
+                            blob = ws.recv(timeout=60)
                         except Exception as exc:
                             self.on_status(f"读数据块失败：{exc}")
                             return
@@ -329,4 +390,11 @@ class P2PSession:
                         self.on_progress(idx_expect, total, name)
                 self.on_status(f"✅ 已保存：{out_path}")
         except Exception as exc:
-            self.on_status(f"接收失败：{exc}")
+            err = str(exc)
+            if "timed out" in err.lower() or "timeout" in err.lower():
+                self.on_status(
+                    f"连接中转超时：{exc}\n"
+                    "请检查中转地址、网络/代理，以及 Cloudflare Worker 是否已部署。"
+                )
+            else:
+                self.on_status(f"接收失败：{exc}")

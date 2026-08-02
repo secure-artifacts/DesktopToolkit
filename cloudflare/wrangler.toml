@@ -1,4 +1,4 @@
-name = "quaker-parrot-p2p"
+name = "desktop-toolkit-p2p"
 main = "signaling-worker.js"
 compatibility_date = "2024-11-01"
 

@@ -130,7 +130,7 @@ class FloatingLyricsWindow(QWidget):
         self.main_layout.setContentsMargins(15, 8, 15, 8)
         self.main_layout.setSpacing(4)
         
-        self.lbl_curr = OutlinedLabel("🎵 宠物歌词播放器已就绪", font_size=23, bold=True, parent=self)
+        self.lbl_curr = OutlinedLabel("🎵 桌面音乐播放器已就绪", font_size=23, bold=True, parent=self)
         self.lbl_next = OutlinedLabel("", font_size=17, bold=False, parent=self)
         self.lbl_next.text_color = QColor(220, 220, 220, 170)
         
@@ -421,12 +421,12 @@ class LyricsDashboard(QWidget):
     @staticmethod
     def _user_data_root() -> Path:
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home())
-        root = Path(base) / "QuakerParrotPet"
+        root = Path(base) / "DesktopToolkit"
         try:
             root.mkdir(parents=True, exist_ok=True)
             return root
         except OSError:
-            fallback = Path.home() / ".QuakerParrotPet"
+            fallback = Path.home() / ".DesktopToolkit"
             fallback.mkdir(parents=True, exist_ok=True)
             return fallback
 
