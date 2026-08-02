@@ -34,8 +34,22 @@ pip install pyinstaller
 python -m PyInstaller --noconfirm DesktopToolkit.spec
 ```
 
-输出目录：`dist\DesktopToolkit\`  
-便携包：将目录内容压成 `DesktopToolkit-1.0.4-windows-portable.zip`。
+输出目录：`dist\DesktopToolkit\`
+
+**便携包 zip：**
+
+```bat
+Compress-Archive -Path dist\DesktopToolkit\* -DestinationPath dist\release\DesktopToolkit-1.0.4-windows-portable.zip
+```
+
+**安装包 Setup.exe（Inno Setup）：**
+
+```bat
+"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" installer\DesktopToolkit.iss
+```
+
+产物：`dist\release\DesktopToolkit-1.0.4-windows-setup.exe`  
+双击安装 → 开始菜单 / 可选桌面图标 / 可选开机自启 / 可卸载。
 
 ## 发布（安全标准）
 

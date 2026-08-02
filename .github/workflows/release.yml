@@ -62,6 +62,31 @@ jobs:
             Set-Content -Path (Join-Path $releaseDir "DesktopToolkit-$version-windows-portable.sha256") -Encoding utf8
           Get-ChildItem $releaseDir | Format-Table Name, Length
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            throw "Inno Setup ISCC.exe not found after install"
+          }
+
+      - name: Build Windows Setup installer
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $iss = Join-Path $PWD "installer\DesktopToolkit.iss"
+          # keep iss AppVersion in sync with tag
+          (Get-Content $iss -Raw) -replace '#define MyAppVersion "[\d.]+"', "#define MyAppVersion `"$version`"" |
+            Set-Content $iss -Encoding UTF8
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" $iss
+          $setup = Join-Path $PWD "dist\release\DesktopToolkit-$version-windows-setup.exe"
+          if (-not (Test-Path $setup)) { throw "Setup exe missing: $setup" }
+          $releaseDir = Join-Path $PWD "release-assets"
+          Copy-Item $setup (Join-Path $releaseDir (Split-Path $setup -Leaf)) -Force
+          Get-FileHash -Algorithm SHA256 -LiteralPath $setup |
+            ForEach-Object { "$($_.Hash.ToLowerInvariant())  $(Split-Path $setup -Leaf)" } |
+            Set-Content -Path (Join-Path $releaseDir "DesktopToolkit-$version-windows-setup.sha256") -Encoding utf8
+
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
         with:
