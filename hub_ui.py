@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
 
             ver = QLabel(f"v{_VER}")
         except Exception:
-            ver = QLabel("v1.0.9")
+            ver = QLabel("v1.1.0")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -587,7 +587,7 @@ class MainWindow(QMainWindow):
 
             ver_txt = APP_VERSION
         except Exception:
-            ver_txt = "1.0.9"
+            ver_txt = "1.1.0"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)

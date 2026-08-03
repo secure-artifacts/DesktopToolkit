@@ -26,15 +26,23 @@ from typing import Callable
 import cv2
 import numpy as np
 import sounddevice as sd
-import win32api
-import win32con
-import win32gui
-import win32ui
 
 try:
     import mss
 except ImportError:
     mss = None  # type: ignore
+
+# Windows GDI window capture — optional (not available on macOS)
+if sys.platform == "win32":
+    import win32api  # type: ignore
+    import win32con  # type: ignore
+    import win32gui  # type: ignore
+    import win32ui  # type: ignore
+else:
+    win32api = None  # type: ignore
+    win32con = None  # type: ignore
+    win32gui = None  # type: ignore
+    win32ui = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +84,11 @@ def get_monitors() -> list[dict]:
                     )
         return out
     # Fallback single screen
-    w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
-    h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+    if win32api is not None and win32con is not None:
+        w = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)
+        h = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
+    else:
+        w, h = 1920, 1080
     return [
         {
             "id": "all",
@@ -93,7 +104,9 @@ def get_monitors() -> list[dict]:
 
 
 def get_window_list(*, browsers_only: bool = False) -> list[dict]:
-    """Visible top-level windows with title/hwnd/class."""
+    """Visible top-level windows with title/hwnd/class (Windows). Empty on other OS."""
+    if win32gui is None:
+        return []
     browser_classes = {
         "Chrome_WidgetWin_1",
         "MozillaWindowClass",
@@ -245,7 +258,9 @@ def capture_bgr(region: dict | None = None) -> np.ndarray | None:
         except Exception as exc:
             print(f"mss capture failed: {exc}", flush=True)
 
-    # GDI fallback
+    # GDI fallback (Windows only)
+    if win32api is None or win32gui is None or win32ui is None or win32con is None:
+        return None
     try:
         if region:
             left, top = int(region["left"]), int(region["top"])
@@ -280,7 +295,7 @@ def resolve_region(target: dict | None) -> dict | None:
     if not target:
         return None
     hwnd = int(target.get("hwnd") or 0)
-    if hwnd > 0 and win32gui.IsWindow(hwnd):
+    if hwnd > 0 and win32gui is not None and win32gui.IsWindow(hwnd):
         try:
             # Prefer restored geometry
             rect = win32gui.GetWindowRect(hwnd)
@@ -314,7 +329,14 @@ def draw_cursor_highlight(
 ) -> None:
     """Draw cursor highlight in-place (BGR)."""
     try:
-        cx, cy = win32gui.GetCursorPos()
+        if win32gui is not None:
+            cx, cy = win32gui.GetCursorPos()
+        else:
+            # macOS / others: best-effort via Qt if available
+            from PyQt6.QtGui import QCursor
+
+            p = QCursor.pos()
+            cx, cy = int(p.x()), int(p.y())
     except Exception:
         return
     if region:

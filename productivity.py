@@ -70,17 +70,32 @@ class TodoManager:
         self.board["items"] = kept
         return f"已清除 {removed} 条已完成。"
 
+    def reorder(self, ordered_ids: list[str]) -> None:
+        """Reorder items to match ordered_ids (drag-drop order). Unknown ids keep original relative order at end."""
+        by_id = {str(t.get("id") or ""): t for t in self.list_items()}
+        new_list: list[dict] = []
+        seen: set[str] = set()
+        for tid in ordered_ids:
+            tid = str(tid or "")
+            if tid and tid in by_id and tid not in seen:
+                new_list.append(by_id[tid])
+                seen.add(tid)
+        for tid, item in by_id.items():
+            if tid not in seen:
+                new_list.append(item)
+        self.board["items"] = new_list
+
 
 class TodoBoardsStore:
     """Multiple floating todo boards (like multi sticky notes)."""
 
     DEFAULT_COLORS = [
+        "#f0fdf4",  # mint (pet default)
+        "#fffceb",
+        "#eff6ff",
+        "#fdf2f8",
+        "#faf5ff",
         "#fef08a",
-        "#bbf7d0",
-        "#bfdbfe",
-        "#fecaca",
-        "#e9d5ff",
-        "#fed7aa",
     ]
 
     def __init__(self, state: dict) -> None:
@@ -112,8 +127,9 @@ class TodoBoardsStore:
         n = len(self.list_boards()) + 1
         board = {
             "id": _uid(),
-            "title": (title or "").strip() or f"待办 {n}",
+            "title": (title or "").strip() or "✓ 待办清单",
             "color": self.DEFAULT_COLORS[(n - 1) % len(self.DEFAULT_COLORS)],
+            "bar_color": "#86efac",
             "items": [],
         }
         self.state.setdefault("todo_lists", []).append(board)

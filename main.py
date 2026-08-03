@@ -309,10 +309,17 @@ class ToolkitApp(QObject):
             QMessageBox.warning(None, "音乐", f"打开失败：{e}")
 
     def show_pomodoro(self) -> None:
-        from simple_boards import PomodoroBoard
+        from simple_boards import PomodoroBoard, _clamp_widget_to_screens
 
         if self.pomo_board is None:
             self.pomo_board = PomodoroBoard(self.store.state, self.store.save_state)
+            ui = (self.store.state.get("pomodoro_ui") or {})
+            if ui.get("x") is not None and ui.get("y") is not None:
+                try:
+                    self.pomo_board.move(int(ui["x"]), int(ui["y"]))
+                except (TypeError, ValueError):
+                    pass
+        _clamp_widget_to_screens(self.pomo_board, min_w=300, min_h=300)
         self.pomo_board.show()
         self.pomo_board.raise_()
 
