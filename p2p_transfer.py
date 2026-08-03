@@ -107,6 +107,9 @@ def fetch_worker_health(signal_url: str, timeout: float = 8.0) -> dict:
     data = json.loads(raw)
     if not isinstance(data, dict) or not data.get("ok"):
         raise RuntimeError("中转 /health 返回异常，请确认地址与部署是否正确")
+    # Old workers omit this field — treat missing as False (pairing often fails)
+    if "durable_rooms" not in data:
+        data["durable_rooms"] = False
     return data
 
 

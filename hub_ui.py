@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSize, QUrl
+from PyQt6.QtCore import QObject, Qt, QSize, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -23,6 +23,14 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class _UpdateBridge(QObject):
+    """Thread-safe UI callbacks for background update network I/O."""
+
+    check_done = pyqtSignal(object, bool)  # result|Exception, silent_if_latest
+    progress = pyqtSignal(str)
+    download_done = pyqtSignal(object, object)  # path|None, err|None
 
 from screenshot_ui import HotkeyCaptureEdit
 from skin import bundle_root
@@ -55,6 +63,12 @@ class MainWindow(QMainWindow):
         logo = bundle_root() / "logo.png"
         if logo.exists():
             self.setWindowIcon(QIcon(str(logo)))
+
+        # Background-thread → main-thread (do NOT use QTimer from worker threads)
+        self._update_bridge = _UpdateBridge(self)
+        self._update_bridge.check_done.connect(self._on_update_check_done)
+        self._update_bridge.progress.connect(self._on_update_progress)
+        self._update_bridge.download_done.connect(self._on_update_download_done)
 
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
@@ -675,31 +689,64 @@ class MainWindow(QMainWindow):
         if self._update_checking:
             return
         self._update_checking = True
-        self.btn_check_update.setEnabled(False)
-        self.lbl_update_status.setText("正在检查更新…")
+        if hasattr(self, "btn_check_update"):
+            self.btn_check_update.setEnabled(False)
+        if hasattr(self, "lbl_update_status"):
+            self.lbl_update_status.setText("正在检查更新…")
         import threading
 
         def work() -> None:
             try:
                 from updater import check_for_update
 
-                result = check_for_update()
+                # Slightly longer timeout; always return via signal (never hang UI)
+                result = check_for_update(timeout=12.0)
             except Exception as e:
                 result = e
-
-            def ui() -> None:
-                self._update_checking = False
-                self.btn_check_update.setEnabled(True)
-                if isinstance(result, Exception):
-                    self.lbl_update_status.setText(f"检查失败：{result}")
-                    return
-                self._apply_update_result(result, silent_if_latest=silent_if_latest)
-
-            from PyQt6.QtCore import QTimer
-
-            QTimer.singleShot(0, ui)
+            self._update_bridge.check_done.emit(result, bool(silent_if_latest))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_check_done(self, result, silent_if_latest: bool) -> None:
+        self._update_checking = False
+        if hasattr(self, "btn_check_update"):
+            self.btn_check_update.setEnabled(True)
+        if isinstance(result, Exception):
+            if hasattr(self, "lbl_update_status"):
+                self.lbl_update_status.setText(f"检查失败：{result}")
+            if not silent_if_latest:
+                QMessageBox.warning(self, "检查更新", f"检查失败：{result}")
+            return
+        self._apply_update_result(result, silent_if_latest=silent_if_latest)
+
+    def _on_update_progress(self, text: str) -> None:
+        if hasattr(self, "lbl_update_status"):
+            self.lbl_update_status.setText(text)
+
+    def _on_update_download_done(self, path, err) -> None:
+        if hasattr(self, "btn_check_update"):
+            self.btn_check_update.setEnabled(True)
+        if err is not None:
+            if hasattr(self, "lbl_update_status"):
+                self.lbl_update_status.setText(f"下载/安装失败：{err}")
+            QMessageBox.warning(self, "更新失败", str(err))
+            return
+        if hasattr(self, "lbl_update_status"):
+            self.lbl_update_status.setText(f"已启动安装程序：{path}")
+        box = QMessageBox(self)
+        box.setWindowTitle("更新")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText("安装程序已启动。\n为避免文件占用，建议现在退出 Desktop Toolkit。")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.button(QMessageBox.StandardButton.Yes).setText("退出软件")
+        box.button(QMessageBox.StandardButton.No).setText("稍后退出")
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            try:
+                self.host.quit()
+            except Exception:
+                pass
 
     def _apply_update_result(self, result, *, silent_if_latest: bool = False) -> None:
         self.lbl_update_status.setText(result.message)
@@ -770,44 +817,13 @@ class MainWindow(QMainWindow):
 
                 def prog(done: int, total: int) -> None:
                     pct = int(done * 100 / total) if total else 0
-
-                    def ui_p() -> None:
-                        self.lbl_update_status.setText(f"正在下载安装包… {pct}%")
-
-                    from PyQt6.QtCore import QTimer
-
-                    QTimer.singleShot(0, ui_p)
+                    self._update_bridge.progress.emit(f"正在下载安装包… {pct}%")
 
                 path = download_update(url, filename=name, progress_cb=prog)
                 launch_installer(path)
             except Exception as e:
                 err = e
-
-            def ui() -> None:
-                self.btn_check_update.setEnabled(True)
-                if err is not None:
-                    self.lbl_update_status.setText(f"下载/安装失败：{err}")
-                    QMessageBox.warning(self, "更新失败", str(err))
-                    return
-                self.lbl_update_status.setText(f"已启动安装程序：{path}")
-                box = QMessageBox(self)
-                box.setWindowTitle("更新")
-                box.setIcon(QMessageBox.Icon.Information)
-                box.setText("安装程序已启动。\n为避免文件占用，建议现在退出 Desktop Toolkit。")
-                box.setStandardButtons(
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                )
-                box.button(QMessageBox.StandardButton.Yes).setText("退出软件")
-                box.button(QMessageBox.StandardButton.No).setText("稍后退出")
-                if box.exec() == QMessageBox.StandardButton.Yes:
-                    try:
-                        self.host.quit()
-                    except Exception:
-                        pass
-
-            from PyQt6.QtCore import QTimer
-
-            QTimer.singleShot(0, ui)
+            self._update_bridge.download_done.emit(path, err)
 
         threading.Thread(target=work, daemon=True).start()
 
