@@ -14,6 +14,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -199,6 +200,22 @@ def _ffmpeg_bin() -> str:
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
+
+
+def _silent_subprocess_kwargs() -> dict:
+    """Hide console window for ffmpeg (console-subsystem) on Windows."""
+    if sys.platform != "win32":
+        return {}
+    # CREATE_NO_WINDOW = 0x08000000 — no black cmd flash while recording/muxing
+    kw: dict = {"creationflags": 0x08000000}
+    try:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE
+        kw["startupinfo"] = si
+    except Exception:
+        pass
+    return kw
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +711,7 @@ class ScreenRecorder:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                **_silent_subprocess_kwargs(),
             )
             return True
         except Exception as exc:
@@ -830,7 +848,12 @@ def fast_mux(video_path: str, audio_path: str | None, output_path: str) -> bool:
                 "+faststart",
                 output_path,
             ]
-        r = subprocess.run(cmd, capture_output=True, timeout=120)
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=120,
+            **_silent_subprocess_kwargs(),
+        )
         if r.returncode == 0 and os.path.exists(output_path):
             return True
         # fallback copy video only

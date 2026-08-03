@@ -1003,6 +1003,8 @@ class FloatingRecorderBoard(QWidget):
             w.setEnabled(False)
         self.duration_timer.start(500)
         self._set_status("🔴 录制中 00:00")
+        # Quiet UI: hide settings/hub so recording is not cluttered; only control bar stays
+        self._enter_silent_recording_ui()
         try:
             self.control_bar.btn_brush.setChecked(self.btn_brush.isChecked())
             self.control_bar.set_recording_ui(True, paused=False)
@@ -1062,6 +1064,67 @@ class FloatingRecorderBoard(QWidget):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _enter_silent_recording_ui(self) -> None:
+        """Minimize settings/main window noise while recording (keep floating control bar)."""
+        self._ui_hidden_for_rec = True
+        try:
+            self.preview_timer.stop()
+        except Exception:
+            pass
+        # Floating settings board
+        if not self.embedded:
+            try:
+                self.hide()
+            except Exception:
+                pass
+        # Main hub if embedded or parent window visible
+        try:
+            host = getattr(self.callbacks, "host", None) if self.callbacks else None
+            # callbacks is SimpleNamespace / host methods — main window via QApplication top levels
+            from PyQt6.QtWidgets import QApplication
+
+            for w in QApplication.topLevelWidgets():
+                name = type(w).__name__
+                # Hide hub main window; keep control bar + overlay + tray
+                if name in ("MainWindow",) and w.isVisible():
+                    w.setProperty("_dt_hidden_for_rec", True)
+                    w.hide()
+        except Exception:
+            pass
+        # Also hide non-embedded board if parent is hub page — parent is MainWindow content
+        try:
+            p = self.window()
+            if p is not None and p is not self and type(p).__name__ == "MainWindow" and p.isVisible():
+                p.setProperty("_dt_hidden_for_rec", True)
+                p.hide()
+        except Exception:
+            pass
+
+    def _leave_silent_recording_ui(self) -> None:
+        if not getattr(self, "_ui_hidden_for_rec", False):
+            return
+        self._ui_hidden_for_rec = False
+        try:
+            self.preview_timer.start(200)
+        except Exception:
+            pass
+        try:
+            from PyQt6.QtWidgets import QApplication
+
+            for w in QApplication.topLevelWidgets():
+                if w.property("_dt_hidden_for_rec"):
+                    w.setProperty("_dt_hidden_for_rec", False)
+                    w.show()
+                    w.raise_()
+        except Exception:
+            pass
+        if not self.embedded:
+            try:
+                self.show()
+                self.raise_()
+            except Exception:
+                pass
+
     def _on_save_finished(self, msg: str) -> None:
         self._busy_stop = False
         self.recorder = None
@@ -1082,6 +1145,7 @@ class FloatingRecorderBoard(QWidget):
             self.control_bar.btn_brush.setChecked(False)
         except Exception:
             pass
+        self._leave_silent_recording_ui()
 
     def _tick(self) -> None:
         if self.recorder and self.recorder.is_recording:
