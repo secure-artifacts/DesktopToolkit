@@ -84,6 +84,32 @@ def normalize_http_base(url: str) -> str:
     return u.rstrip("/")
 
 
+def fetch_worker_health(signal_url: str, timeout: float = 8.0) -> dict:
+    """GET /health — verify Worker is up and Durable Object rooms are bound."""
+    import urllib.error
+    import urllib.request
+
+    base = normalize_http_base(signal_url)
+    req = urllib.request.Request(
+        f"{base}/health",
+        headers={"Accept": "application/json", "User-Agent": "DesktopToolkit-P2P/1.0"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+        raise RuntimeError(f"健康检查 HTTP {e.code}: {body[:200] or e.reason}") from e
+    except Exception as e:
+        raise RuntimeError(f"无法访问中转：{e}") from e
+
+    data = json.loads(raw)
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError("中转 /health 返回异常，请确认地址与部署是否正确")
+    return data
+
+
 def fetch_worker_usage(signal_url: str, timeout: float = 8.0) -> dict:
     """GET /usage from Worker. Returns dict with used/remaining or raises."""
     import urllib.error
@@ -249,8 +275,13 @@ class P2PSession:
                 if not peer_ready:
                     self.on_status(
                         "等待对方超时（约 3 分钟）。\n"
-                        "请检查：①双方房间号是否相同 ②中转地址是否相同 "
-                        "③对方是否已点「等待接收」④网络/防火墙是否拦截 WebSocket。"
+                        "请检查：\n"
+                        "① 双方房间号是否完全相同（建议一方生成后口述/复制给另一方）\n"
+                        "② 双方中转地址是否完全相同（同一 *.workers.dev）\n"
+                        "③ 对方是否已先点「等待接收」且仍显示在房间内\n"
+                        "④ 浏览器打开 https://你的地址/health ，确认 durable_rooms 为 true\n"
+                        "   （false 时双方会被分到不同服务器，永远等不到对方）\n"
+                        "⑤ 若 durable_rooms=false：在 cloudflare/ 执行 wrangler deploy 更新 Worker"
                     )
                     return
 
@@ -331,8 +362,11 @@ class P2PSession:
                 if not offer:
                     self.on_status(
                         "等待文件信息超时（约 3 分钟）。\n"
-                        "请检查：①双方房间号是否相同 ②中转地址是否相同 "
-                        "③对方是否已点「发送文件」④网络是否正常。"
+                        "请检查：\n"
+                        "① 双方房间号 + 中转地址是否完全相同\n"
+                        "② 发送方是否已点「发送文件」且未先超时\n"
+                        "③ https://你的地址/health 是否 durable_rooms=true\n"
+                        "④ 若为 false：cd cloudflare && npx wrangler deploy 后重试"
                     )
                     return
                 name = Path(str(offer.get("name") or "received.bin")).name

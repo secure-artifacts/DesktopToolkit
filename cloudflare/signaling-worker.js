@@ -12,6 +12,7 @@
  *   - File bytes are streamed in memory and NEVER written to R2/KV/disk
  *   - /usage returns approximate daily request count (Cache API, no R2/KV)
  *
+ * Rooms use Durable Objects so both peers always land on the same instance.
  * Free plan: ~100,000 requests/day per account (shared). WebSocket Upgrade
  * counts as 1 request; messages after connect do NOT count as requests.
  */
@@ -21,7 +22,6 @@ const FREE_DAILY_LIMIT = 100000;
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    // Normalize trailing slash (except bare "/")
     const path =
       url.pathname.length > 1 && url.pathname.endsWith("/")
         ? url.pathname.slice(0, -1)
@@ -33,6 +33,7 @@ export default {
         ok: true,
         name: "desktop-toolkit-p2p-signaling",
         storage: "none",
+        durable_rooms: Boolean(env.ROOMS),
         usage: "WebSocket ws(s)://<host>/ws?room=ROOMCODE",
         endpoints: {
           health: "/health",
@@ -43,7 +44,6 @@ export default {
     }
 
     if (path === "/usage") {
-      // Await so response includes this poll itself
       await bumpDayCounter();
       const snap = await readDayCounter();
       const used = snap.used;
@@ -57,6 +57,7 @@ export default {
         worker_requests_today: used,
         remaining_estimate: remaining,
         percent_used: pct,
+        durable_rooms: Boolean(env.ROOMS),
         note:
           "近似值：本 Worker 今日请求（边缘缓存计数，非 Cloudflare 账户精确账单）。" +
           "免费额度是整个账户共享 10 万次/天；WebSocket 建连计 1 次，传文件数据块不计请求。",
@@ -64,6 +65,10 @@ export default {
           ws_upgrade_counts_as_request: true,
           ws_messages_count_as_request: false,
           one_transfer_roughly: "双方各连 1 次 ≈ 2 次请求",
+          room_pairing:
+            env.ROOMS
+              ? "Durable Objects 房间已启用，双方可跨节点配对"
+              : "未启用 Durable Objects：双方可能连到不同实例导致等对方超时",
         },
       });
     }
@@ -78,13 +83,14 @@ export default {
         return new Response("expected websocket", { status: 426 });
       }
 
-      // Durable Object rooms (recommended). Fallback: ephemeral pair map.
+      // Prefer Durable Object rooms (sticky per room code).
       if (env.ROOMS) {
         const id = env.ROOMS.idFromName(room);
         const stub = env.ROOMS.get(id);
         return stub.fetch(request);
       }
 
+      // Fallback only (unreliable across Cloudflare isolates)
       return handleEphemeralRoom(request, room);
     }
 
@@ -108,7 +114,6 @@ function utcDay() {
 }
 
 function counterKey(day) {
-  // Synthetic URL key for Cache API (no real origin fetch)
   return new Request(`https://quaker-parrot-p2p.internal/usage-counter/${day}`);
 }
 
@@ -124,7 +129,7 @@ async function readDayCounter() {
   return { day, used: 0 };
 }
 
-async function bumpDayCounter(ctx) {
+async function bumpDayCounter() {
   try {
     const day = utcDay();
     const key = counterKey(day);
@@ -137,17 +142,14 @@ async function bumpDayCounter(ctx) {
     const resp = new Response(String(used), {
       headers: {
         "content-type": "text/plain",
-        // Keep until next UTC day roughly
         "cache-control": "max-age=172800",
       },
     });
     await caches.default.put(key, resp);
-  } catch (_) {
-    // Counter is best-effort; never break transfers
-  }
+  } catch (_) {}
 }
 
-/** In-isolate room map (single-colo, best-effort; prefer Durable Objects). */
+/** In-isolate room map — only works if both peers hit the same isolate. */
 const EPHEMERAL = new Map();
 
 function handleEphemeralRoom(request, room) {
@@ -160,7 +162,6 @@ function handleEphemeralRoom(request, room) {
   peers.add(server);
 
   server.addEventListener("message", (event) => {
-    // Forward to other peers only — never persist
     for (const p of peers) {
       if (p !== server && p.readyState === 1) {
         try {
@@ -181,13 +182,13 @@ function handleEphemeralRoom(request, room) {
 }
 
 /**
- * Durable Object room — sticky across requests for a room code.
- * wrangler.toml: [[durable_objects.bindings]] name="ROOMS" class_name="Room"
+ * Durable Object room — same room code always routes to the same instance.
+ * Hibernation API: getWebSockets() survives DO sleep.
  */
 export class Room {
   constructor(state, env) {
     this.state = state;
-    this.peers = new Set();
+    this.env = env;
   }
 
   async fetch(request) {
@@ -196,22 +197,30 @@ export class Room {
     }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
+    // Hibernatable WebSocket — required for DO free plan reliability
     this.state.acceptWebSocket(server);
-    this.peers.add(server);
-
-    server.addEventListener("message", (event) => {
-      for (const p of this.peers) {
-        if (p !== server && p.readyState === 1) {
-          try {
-            p.send(event.data);
-          } catch (_) {}
-        }
-      }
-    });
-    const cleanup = () => this.peers.delete(server);
-    server.addEventListener("close", cleanup);
-    server.addEventListener("error", cleanup);
-
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws, message) {
+    const peers = this.state.getWebSockets();
+    for (const p of peers) {
+      if (p === ws) continue;
+      try {
+        p.send(message);
+      } catch (_) {}
+    }
+  }
+
+  async webSocketClose(ws, code, reason, wasClean) {
+    try {
+      ws.close(code, reason);
+    } catch (_) {}
+  }
+
+  async webSocketError(ws) {
+    try {
+      ws.close(1011, "error");
+    } catch (_) {}
   }
 }

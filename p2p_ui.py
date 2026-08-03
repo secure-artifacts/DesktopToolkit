@@ -122,13 +122,20 @@ class FloatingP2PBoard(QWidget):
         lay.addWidget(tip)
 
         lay.addWidget(QLabel("中转地址（Cloudflare Worker）"))
+        url_row = QHBoxLayout()
         self.txt_url = QLineEdit()
         self.txt_url.setPlaceholderText("wss://your-worker.example.workers.dev")
         from p2p_transfer import DEFAULT_SIGNAL_URL
 
         if DEFAULT_SIGNAL_URL:
             self.txt_url.setText(DEFAULT_SIGNAL_URL)
-        lay.addWidget(self.txt_url)
+        url_row.addWidget(self.txt_url, 1)
+        self.btn_test = QPushButton("测试中转", objectName="soft")
+        self.btn_test.setMinimumHeight(36)
+        self.btn_test.setMinimumWidth(88)
+        self.btn_test.clicked.connect(self._test_relay)
+        url_row.addWidget(self.btn_test)
+        lay.addLayout(url_row)
 
         # Free-plan request quota hint
         quota_box = QFrame()
@@ -213,9 +220,9 @@ class FloatingP2PBoard(QWidget):
 
         help_l = QLabel(
             "部署：在 cloudflare/ 目录执行 wrangler deploy，把输出的 *.workers.dev 填到上方。\n"
-            "正确顺序（推荐）：双方先填同一中转地址 + 同一房间号 → "
-            "接收方先点「等待接收」→ 发送方再点「发送文件」。\n"
-            "若提示等待超时：检查房间号/地址是否一致、双方是否都已点按钮、网络是否拦截 WebSocket。"
+            "正确顺序：双方同一中转 + 同一房间号 → 接收方先「等待接收」→ 发送方再「发送文件」。\n"
+            "等对方超时多半是中转未开房间粘连：点「测试中转」，须 durable_rooms=true；"
+            "否则请更新 cloudflare/ 后重新 wrangler deploy。"
         )
         help_l.setObjectName("muted")
         help_l.setWordWrap(True)
@@ -308,6 +315,51 @@ class FloatingP2PBoard(QWidget):
                     "参考：免费约 10 万次请求/天；建连计次，传文件块不计。"
                 )
                 self._bridge.usage.emit(msg, 0, 100_000)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _test_relay(self) -> None:
+        """Ping /health so user can verify Worker URL + Durable Object rooms."""
+        url = self.txt_url.text().strip()
+        if not url:
+            self.lbl_status.setText("请先填写中转地址再测试。")
+            return
+        self.btn_test.setEnabled(False)
+        self.btn_test.setText("测试中…")
+        self.lbl_status.setText("正在测试中转…")
+
+        def work() -> None:
+            try:
+                from p2p_transfer import fetch_worker_health, normalize_http_base
+
+                info = fetch_worker_health(url)
+                base = normalize_http_base(url)
+                durable = bool(info.get("durable_rooms"))
+                if durable:
+                    msg = (
+                        f"✅ 中转正常：{base}\n"
+                        f"房间粘连 durable_rooms=true（可跨网配对）\n"
+                        f"名称：{info.get('name') or 'ok'}"
+                    )
+                else:
+                    msg = (
+                        f"⚠️ 中转能访问，但 durable_rooms=false\n"
+                        f"双方很容易「永远等对方」。\n"
+                        f"请在本机 cloudflare/ 目录执行：npx wrangler deploy\n"
+                        f"然后再测一次，必须看到 durable_rooms=true。"
+                    )
+                self._bridge.status.emit(msg)
+            except Exception as e:
+                self._bridge.status.emit(
+                    f"❌ 中转不可用：{e}\n"
+                    "请核对地址（如 https://xxx.workers.dev），并确认已 wrangler deploy。"
+                )
+            finally:
+                try:
+                    self.btn_test.setEnabled(True)
+                    self.btn_test.setText("测试中转")
+                except Exception:
+                    pass
 
         threading.Thread(target=work, daemon=True).start()
 
