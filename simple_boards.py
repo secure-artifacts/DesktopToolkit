@@ -207,9 +207,16 @@ class TodoBoard(_DragBase):
         self.btn_color.setMinimumWidth(48)
         self.btn_color.clicked.connect(self._pick_color)
         head.addWidget(self.btn_color)
+        self.btn_del_board = QPushButton("删除")
+        self.btn_del_board.setFixedHeight(30)
+        self.btn_del_board.setMinimumWidth(48)
+        self.btn_del_board.setToolTip("永久删除此待办窗口（下次不会再打开）")
+        self.btn_del_board.clicked.connect(self._delete_board)
+        head.addWidget(self.btn_del_board)
         self.btn_close = QPushButton("关闭")
         self.btn_close.setFixedHeight(30)
         self.btn_close.setMinimumWidth(48)
+        self.btn_close.setToolTip("关闭此窗口；下次打开待办时不会自动弹出")
         self.btn_close.clicked.connect(self._close)
         head.addWidget(self.btn_close)
         self.lay.addLayout(head)
@@ -267,7 +274,7 @@ class TodoBoard(_DragBase):
         for i in range(self.list.count()):
             self.list.item(i).setForeground(QColor(fg))
         soft = self._header_btn_style(fg, self.color)
-        for b in (self.btn_pin, self.btn_fold, self.btn_color, self.btn_close):
+        for b in (self.btn_pin, self.btn_fold, self.btn_color, self.btn_del_board, self.btn_close):
             b.setStyleSheet(soft)
         self.btn_new.setStyleSheet(
             f"QPushButton {{ background:{fg}; color:{self.color}; border:none; "
@@ -293,10 +300,35 @@ class TodoBoard(_DragBase):
             self.on_add_board()
 
     def _close(self) -> None:
+        """Hide and mark auto_open=False so next launch / 打开待办 won't reopen it."""
         self._rename()
+        self.board["auto_open"] = False
+        self.on_save()
         self.hide()
         if callable(self.on_close_board):
-            self.on_close_board(self.board_id())
+            self.on_close_board(self.board_id(), delete=False)
+
+    def _delete_board(self) -> None:
+        """Permanently remove this todo board from storage."""
+        from PyQt6.QtWidgets import QMessageBox
+
+        n = len(self.mgr.list_items())
+        title = self.title_edit.text().strip() or "待办"
+        msg = f"确定永久删除待办窗口「{title}」吗？"
+        if n:
+            msg += f"\n其中还有 {n} 条事项，删除后不可恢复。"
+        reply = QMessageBox.question(
+            self,
+            "删除待办窗口",
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.hide()
+        if callable(self.on_close_board):
+            self.on_close_board(self.board_id(), delete=True)
 
     def _apply_pin(self) -> None:
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
@@ -320,6 +352,7 @@ class TodoBoard(_DragBase):
             self.btn_new.hide()
             self.btn_pin.hide()
             self.btn_color.hide()
+            self.btn_del_board.hide()
             self.btn_close.hide()
             self._full_h = max(self.height(), 280)
             self.lay.setContentsMargins(8, 4, 6, 4)
@@ -336,6 +369,7 @@ class TodoBoard(_DragBase):
             self.btn_new.show()
             self.btn_pin.show()
             self.btn_color.show()
+            self.btn_del_board.show()
             self.btn_close.show()
             self.btn_fold.setFixedHeight(30)
             self.btn_fold.setMinimumWidth(48)
@@ -427,15 +461,18 @@ class TodosController:
         self.windows: dict[str, TodoBoard] = {}
 
     def show_all(self) -> None:
-        boards = self.store.list_boards()
-        if not boards:
-            self.add_board()
+        """Only open boards that are still auto_open (not closed/cleaned by user)."""
+        boards = [b for b in self.store.list_boards() if b.get("auto_open", True)]
+        if boards:
+            for b in boards:
+                self._ensure_window(b)
             return
-        for b in boards:
-            self._ensure_window(b)
+        # None currently open — open a fresh board (closed ones stay closed until ＋ or 删除)
+        self.add_board()
 
     def add_board(self) -> None:
         b = self.store.add_board()
+        b["auto_open"] = True
         self.on_save()
         self._ensure_window(b)
 
@@ -443,6 +480,7 @@ class TodosController:
         bid = str(board.get("id") or "")
         if not bid:
             return
+        board["auto_open"] = True
         if bid in self.windows:
             w = self.windows[bid]
             if not w.isVisible():
@@ -462,8 +500,21 @@ class TodosController:
         w.raise_()
         self.windows[bid] = w
 
-    def _on_close(self, board_id: str) -> None:
-        self.windows.pop(board_id, None)
+    def _on_close(self, board_id: str, delete: bool = False) -> None:
+        w = self.windows.pop(board_id, None)
+        if w is not None:
+            try:
+                w.hide()
+                w.deleteLater()
+            except Exception:
+                pass
+        if delete:
+            self.store.remove_board(board_id)
+            # remove_board may re-add a default empty board if list empty — keep auto_open false on ghost
+            for b in self.store.list_boards():
+                if b.get("id") == board_id:
+                    break
+            self.on_save()
 
 
 class StickyNoteWindow(_DragBase):
@@ -519,8 +570,14 @@ class StickyNoteWindow(_DragBase):
         self.btn_color.setFixedHeight(22)
         self.btn_color.clicked.connect(self._pick_color)
         head.addWidget(self.btn_color)
+        self.btn_delete = QPushButton("删除", objectName="soft")
+        self.btn_delete.setFixedHeight(22)
+        self.btn_delete.setToolTip("永久删除这张便签（下次不会再打开）")
+        self.btn_delete.clicked.connect(self._delete_note)
+        head.addWidget(self.btn_delete)
         self.btn_close = QPushButton("关闭", objectName="soft")
         self.btn_close.setFixedHeight(22)
+        self.btn_close.setToolTip("关闭便签；下次打开便签时不会自动弹出")
         self.btn_close.clicked.connect(self._close_and_save)
         head.addWidget(self.btn_close)
         lay.addLayout(head)
@@ -550,7 +607,7 @@ class StickyNoteWindow(_DragBase):
             f"QPushButton {{ background:rgba(0,0,0,0.16); color:{fg}; border:1px solid {fg}; "
             f"border-radius:6px; padding:2px 6px; font-weight:800; font-size:11px; }}"
         )
-        for b in (self.btn_new, self.btn_pin, self.btn_fold, self.btn_color, self.btn_close):
+        for b in (self.btn_new, self.btn_pin, self.btn_fold, self.btn_color, self.btn_delete, self.btn_close):
             b.setStyleSheet(soft)
         # ＋ 更醒目
         self.btn_new.setStyleSheet(
@@ -587,6 +644,7 @@ class StickyNoteWindow(_DragBase):
             self.btn_new.hide()
             self.btn_pin.hide()
             self.btn_color.hide()
+            self.btn_delete.hide()
             self.btn_close.hide()
             self._full_h = max(self.height(), 180)
             # margins tight so 36px bar fits title + expand
@@ -610,6 +668,7 @@ class StickyNoteWindow(_DragBase):
             self.btn_new.show()
             self.btn_pin.show()
             self.btn_color.show()
+            self.btn_delete.show()
             self.btn_close.show()
             self.btn_fold.setFixedHeight(22)
             self.btn_fold.setMinimumWidth(0)
@@ -642,8 +701,28 @@ class StickyNoteWindow(_DragBase):
             self._persist()
 
     def _close_and_save(self) -> None:
+        """Close window; mark auto_open=False so next 打开便签 won't auto-show it."""
         self._persist()
-        self.on_close_note(str(self.note.get("id") or ""))
+        self.note["auto_open"] = False
+        self.on_save()
+        self.on_close_note(str(self.note.get("id") or ""), delete=False)
+        self.hide()
+
+    def _delete_note(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+
+        title = self.title.text().strip() or "便签"
+        reply = QMessageBox.question(
+            self,
+            "删除便签",
+            f"确定永久删除「{title}」吗？内容不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        nid = str(self.note.get("id") or "")
+        self.on_close_note(nid, delete=True)
         self.hide()
 
 
@@ -657,17 +736,20 @@ class NotesController:
         self.windows: dict[str, StickyNoteWindow] = {}
 
     def show_all(self) -> None:
-        notes = self.mgr.list_items()
-        if not notes:
-            self.add_note()
+        """Only open notes that are still auto_open (user closed/cleaned ones stay away)."""
+        notes = [n for n in self.mgr.list_items() if n.get("auto_open", True)]
+        if notes:
+            for n in notes:
+                self._ensure_window(n)
             return
-        for n in notes:
-            self._ensure_window(n)
+        # None currently open — create one new (closed notes stay closed until 删除)
+        self.add_note()
 
     def add_note(self) -> None:
         n = len(self.mgr.list_items()) + 1
         note = self.mgr.add(f"便签 {n}", "")
         note["color"] = NOTE_COLORS[(n - 1) % len(NOTE_COLORS)]
+        note["auto_open"] = True
         self.on_save()
         self._ensure_window(note)
 
@@ -675,6 +757,7 @@ class NotesController:
         nid = str(note.get("id") or "")
         if not nid:
             return
+        note["auto_open"] = True
         if nid in self.windows:
             w = self.windows[nid]
             # revive closed-but-cached window
@@ -697,14 +780,17 @@ class NotesController:
         w.raise_()
         self.windows[nid] = w
 
-    def _on_close(self, nid: str) -> None:
-        """Hide window only — note data stays so it can reappear via 便签入口."""
+    def _on_close(self, nid: str, delete: bool = False) -> None:
         w = self.windows.pop(nid, None)
         if w is not None:
             try:
                 w.hide()
+                w.deleteLater()
             except Exception:
                 pass
+        if delete and nid:
+            self.mgr.remove(nid)
+            self.on_save()
 
 
 class PomodoroBoard(_DragBase):

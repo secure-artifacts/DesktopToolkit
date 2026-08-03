@@ -94,6 +94,8 @@ class ToolkitApp(QObject):
         QTimer.singleShot(200, self.show_hub)
         QTimer.singleShot(400, self._init_assistant)
         QTimer.singleShot(800, lambda: self.announce("桌面工具箱已就绪"))
+        # Quiet update check shortly after startup (prefs.auto_check_update)
+        QTimer.singleShot(3500, self._startup_check_update)
 
     def _cb(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -201,6 +203,16 @@ class ToolkitApp(QObject):
         )
         self.store.save_state()
         return msg
+
+    def _startup_check_update(self) -> None:
+        prefs = self.store.state.get("prefs") or {}
+        if not prefs.get("auto_check_update", True):
+            return
+        try:
+            if self.main_win is not None and hasattr(self.main_win, "_check_update"):
+                self.main_win._check_update(silent_if_latest=True)
+        except Exception:
+            pass
 
     def pause_screenshot_hotkeys(self) -> None:
         try:

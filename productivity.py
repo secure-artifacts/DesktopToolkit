@@ -129,8 +129,7 @@ class TodoBoardsStore:
         self.state["todo_lists"] = [
             b for b in (self.state.get("todo_lists") or []) if b.get("id") != board_id
         ]
-        if not self.state["todo_lists"]:
-            self.add_board("待办")
+        # Do not auto-recreate — user may want zero open boards until they click ＋
 
 
 class NoteManager:

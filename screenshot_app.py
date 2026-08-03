@@ -136,6 +136,18 @@ DOCK_TOOL_ROW: list[tuple[str, str, str, str]] = [
     ("pixelate", "pixelate", "马赛克", "tool"),
     ("blur", "blur", "模糊", "tool"),
 ]
+# Default editor action shortcuts (overridable via cfg / 截图设置)
+DEFAULT_EDITOR_SHORTCUTS: dict[str, str] = {
+    "copy": "Ctrl+C",
+    "save": "Ctrl+S",
+    "pin": "Ctrl+P",
+    "upload": "Ctrl+U",
+    "undo": "Ctrl+Z",
+    "redo": "Ctrl+Y",
+    "accept": "Return",
+    "cancel": "Esc",
+}
+
 DOCK_ACTION_ROW: list[tuple[str, str, str, str]] = [
     ("undo", "undo", "撤销", "action"),
     ("redo", "redo", "重做", "action"),
@@ -277,18 +289,12 @@ class ScreenshotEditor(QWidget):
         self._text_anchor = QPoint()
 
         self._pinned: list[PinnedShot] = []
+        self._action_shortcuts: list[QShortcut] = []
+        self._editor_shortcut_map = self._load_editor_shortcuts()
 
-        # Shortcuts must NOT steal Enter while typing annotation text
-        QShortcut(QKeySequence("Esc"), self, activated=self._on_esc_shortcut)
-        self._sc_return = QShortcut(QKeySequence("Return"), self)
-        self._sc_return.activated.connect(self._on_enter_shortcut)
-        self._sc_enter = QShortcut(QKeySequence("Enter"), self)
-        self._sc_enter.activated.connect(self._on_enter_shortcut)
-        QShortcut(QKeySequence("Ctrl+C"), self, activated=lambda: self._on_action("copy"))
-        QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: self._on_action("save"))
-        QShortcut(QKeySequence("Ctrl+Z"), self, activated=lambda: self._on_action("undo"))
-        QShortcut(QKeySequence("Ctrl+Y"), self, activated=lambda: self._on_action("redo"))
-        QShortcut(QKeySequence("Ctrl+Shift+Z"), self, activated=lambda: self._on_action("redo"))
+        # Shortcuts must NOT steal Enter while typing annotation text.
+        # ApplicationShortcut so Tool-window focus quirks still get Ctrl+C etc.
+        self._install_action_shortcuts()
 
         if mode == "full":
             QTimer.singleShot(0, self._enter_edit_mode)
@@ -304,6 +310,77 @@ class ScreenshotEditor(QWidget):
             self.update()
         except Exception:
             pass
+
+    def _load_editor_shortcuts(self) -> dict[str, str]:
+        out = dict(DEFAULT_EDITOR_SHORTCUTS)
+        cfg = self.cfg if isinstance(self.cfg, dict) else {}
+        for act in ("copy", "save", "pin", "upload", "undo", "redo"):
+            key = f"shortcut_{act}"
+            val = str(cfg.get(key) or "").strip()
+            if val:
+                out[act] = val
+        return out
+
+    def _shortcut_label(self, act: str) -> str:
+        return (self._editor_shortcut_map.get(act) or "").strip()
+
+    def _tip_with_shortcut(self, base: str, act: str) -> str:
+        sc = self._shortcut_label(act)
+        return f"{base} ({sc})" if sc else base
+
+    def _install_action_shortcuts(self) -> None:
+        for sc in self._action_shortcuts:
+            try:
+                sc.setParent(None)
+                sc.deleteLater()
+            except Exception:
+                pass
+        self._action_shortcuts.clear()
+
+        def _bind(seq: str, handler) -> None:
+            seq = (seq or "").strip()
+            if not seq:
+                return
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(handler)
+            self._action_shortcuts.append(sc)
+
+        m = self._editor_shortcut_map
+        _bind(m.get("copy", "Ctrl+C"), lambda: self._shortcut_action("copy"))
+        _bind(m.get("save", "Ctrl+S"), lambda: self._shortcut_action("save"))
+        _bind(m.get("pin", "Ctrl+P"), lambda: self._shortcut_action("pin"))
+        _bind(m.get("upload", "Ctrl+U"), lambda: self._shortcut_action("upload"))
+        _bind(m.get("undo", "Ctrl+Z"), lambda: self._shortcut_action("undo"))
+        _bind(m.get("redo", "Ctrl+Y"), lambda: self._shortcut_action("redo"))
+        _bind("Ctrl+Shift+Z", lambda: self._shortcut_action("redo"))
+        _bind(m.get("cancel", "Esc"), self._on_esc_shortcut)
+        self._sc_return = QShortcut(QKeySequence("Return"), self)
+        self._sc_return.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._sc_return.activated.connect(self._on_enter_shortcut)
+        self._action_shortcuts.append(self._sc_return)
+        self._sc_enter = QShortcut(QKeySequence("Enter"), self)
+        self._sc_enter.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self._sc_enter.activated.connect(self._on_enter_shortcut)
+        self._action_shortcuts.append(self._sc_enter)
+
+    def _shortcut_action(self, act: str) -> None:
+        if self._text_input_active():
+            return
+        if self.phase == "select" and act in ("copy", "save", "pin", "upload", "accept"):
+            if self.sel.isNull() or self.sel.width() < 4:
+                self._status_hint = "请先框选区域，再使用快捷键"
+                self.update()
+                return
+            self._enter_edit_mode()
+        self._on_action(act)
+
+    def _set_action_shortcuts_enabled(self, enabled: bool) -> None:
+        for sc in self._action_shortcuts:
+            try:
+                sc.setEnabled(enabled)
+            except Exception:
+                pass
 
     def _set_tool(self, t: str) -> None:
         self.tool = t
@@ -435,9 +512,14 @@ class ScreenshotEditor(QWidget):
         self.drawing = False
         self.cur_stroke = None
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self._status_hint = "滚轮调粗细 · 点工具切换 · 在框内绘制 · 完成/取消在工具条"
+        c = self._shortcut_label("copy") or "Ctrl+C"
+        s = self._shortcut_label("save") or "Ctrl+S"
+        p = self._shortcut_label("pin") or "Ctrl+P"
+        u = self._shortcut_label("upload") or "Ctrl+U"
+        self._status_hint = f"滚轮调粗细 · {c}复制 · {s}保存 · {p}图钉 · {u}上传 · Esc取消"
         self._rebuild_dock()
-        self.setFocus()
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.update()
 
     def _enter_select_mode(self, *, clear_strokes: bool = True) -> None:
@@ -476,7 +558,10 @@ class ScreenshotEditor(QWidget):
             hits = []
             x = x0 + pad
             for key, icon_id, tip, kind in items:
-                hits.append((key, icon_id, tip, kind, QRect(x, y, btn_w, btn_h)))
+                label = tip
+                if kind == "action" and key in self._editor_shortcut_map:
+                    label = self._tip_with_shortcut(tip, key)
+                hits.append((key, icon_id, label, kind, QRect(x, y, btn_w, btn_h)))
                 x += btn_w + gap
             return hits, x0, row_w
 
@@ -1038,12 +1123,7 @@ class ScreenshotEditor(QWidget):
 
         self._text_panel = panel
         self._text_edit = edit
-        # Disable global Enter→accept while typing
-        try:
-            self._sc_return.setEnabled(False)
-            self._sc_enter.setEnabled(False)
-        except Exception:
-            pass
+        self._set_action_shortcuts_enabled(False)
         self._status_hint = "文字输入：Enter 或点「确认」写入 · Esc/取消 放弃 · 不会退出截图"
         self.update()
 
@@ -1056,11 +1136,7 @@ class ScreenshotEditor(QWidget):
             self._text_edit.hide()
             self._text_edit.deleteLater()
         self._text_edit = None
-        try:
-            self._sc_return.setEnabled(True)
-            self._sc_enter.setEnabled(True)
-        except Exception:
-            pass
+        self._set_action_shortcuts_enabled(True)
 
     def _commit_text_input(self) -> None:
         edit = self._text_edit
