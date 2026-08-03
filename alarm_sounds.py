@@ -77,6 +77,7 @@ def play_ringtone(ringtone_id: str = "beep", *, async_play: bool = True) -> None
     path = paths.get(ringtone_id) or paths.get("beep")
     if path is None or not path.exists():
         return
+    # Windows: winsound; other platforms: PyQt QSoundEffect
     try:
         import winsound
 
@@ -84,8 +85,30 @@ def play_ringtone(ringtone_id: str = "beep", *, async_play: bool = True) -> None
         if async_play:
             flags |= winsound.SND_ASYNC
         winsound.PlaySound(str(path), flags)
+        return
+    except Exception:
+        pass
+    try:
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtMultimedia import QSoundEffect
+
+        effect = QSoundEffect()
+        effect.setSource(QUrl.fromLocalFile(str(path)))
+        effect.setLoopCount(1)
+        effect.setVolume(0.9)
+        # Keep a ref so GC does not stop playback mid-sound
+        _active_effects.append(effect)
+        effect.playingChanged.connect(
+            lambda: _active_effects.remove(effect)
+            if (not effect.isPlaying() and effect in _active_effects)
+            else None
+        )
+        effect.play()
     except Exception as exc:
         print(f"ringtone play failed: {exc}", flush=True)
+
+
+_active_effects: list = []
 
 
 def stop_ringtone() -> None:
@@ -95,3 +118,9 @@ def stop_ringtone() -> None:
         winsound.PlaySound(None, winsound.SND_PURGE)
     except Exception:
         pass
+    for effect in list(_active_effects):
+        try:
+            effect.stop()
+        except Exception:
+            pass
+    _active_effects.clear()

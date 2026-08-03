@@ -8,10 +8,19 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import win32api
-import win32con
-import win32gui
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QObject, QSize
+
+try:
+    import win32api  # type: ignore
+    import win32con  # type: ignore
+    import win32gui  # type: ignore
+
+    HAS_WIN32 = True
+except ImportError:
+    win32api = None  # type: ignore
+    win32con = None  # type: ignore
+    win32gui = None  # type: ignore
+    HAS_WIN32 = False
 from PyQt6.QtGui import QPainter, QPen, QColor, QImage, QPixmap, QMouseEvent
 from PyQt6.QtWidgets import (
     QApplication,
@@ -107,6 +116,8 @@ class RecordingDrawOverlay(QWidget):
 
     def _force_topmost_clickable(self) -> None:
         """Windows: topmost + clear WS_EX_TRANSPARENT so clicks hit us."""
+        if not HAS_WIN32:
+            return
         try:
             hwnd = int(self.winId())
             GWL_EXSTYLE = -20
@@ -185,7 +196,7 @@ class RecordingDrawOverlay(QWidget):
             return
         try:
             hwnd = int(r.get("hwnd") or 0)
-            if hwnd > 0 and win32gui.IsWindow(hwnd):
+            if HAS_WIN32 and hwnd > 0 and win32gui.IsWindow(hwnd):
                 rect = win32gui.GetWindowRect(hwnd)
                 x, y = rect[0], rect[1]
                 w, h = max(2, rect[2] - rect[0]), max(2, rect[3] - rect[1])
@@ -930,13 +941,26 @@ class FloatingRecorderBoard(QWidget):
             except Exception:
                 region = None
         if not region:
-            # Absolute fallback: primary screen metrics
+            # Absolute fallback: primary / virtual screen metrics
             try:
-                x = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
-                y = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
-                w = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
-                h = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
-                region = {"left": x, "top": y, "width": max(2, w), "height": max(2, h)}
+                if HAS_WIN32:
+                    x = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+                    y = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+                    w = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
+                    h = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
+                    region = {"left": x, "top": y, "width": max(2, w), "height": max(2, h)}
+                else:
+                    scr = QApplication.primaryScreen()
+                    g = scr.geometry() if scr else None
+                    if g is not None:
+                        region = {
+                            "left": int(g.x()),
+                            "top": int(g.y()),
+                            "width": max(2, int(g.width())),
+                            "height": max(2, int(g.height())),
+                        }
+                    else:
+                        region = {"left": 0, "top": 0, "width": 1920, "height": 1080}
             except Exception:
                 region = {"left": 0, "top": 0, "width": 1920, "height": 1080}
         self.overlay.set_region(region)

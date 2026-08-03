@@ -46,12 +46,17 @@ ISCC installer\DesktopToolkit.iss
 
 便携包：将 `dist\DesktopToolkit` 打成 zip，命名 `DesktopToolkit-<ver>-windows-portable.zip`。
 
-**macOS（需本机 Mac）**
+**macOS（本机或 GitHub Actions）**
+
+本机：
 
 ```bash
 chmod +x build_mac.sh
 ./build_mac.sh
 ```
+
+GitHub：推送 `v*` 标签或在 Actions 里手动运行 **Build and Release**（可指定 tag）。  
+`macos-14` runner 会打出 `DesktopToolkit-<ver>-macos.zip` 并挂到该 Release。
 
 产物：Windows 见 `dist/release/`；macOS 见 `dist/release/DesktopToolkit-*-macos.zip`。
 
