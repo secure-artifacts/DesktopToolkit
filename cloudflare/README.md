@@ -6,13 +6,17 @@
 
 ## 部署 / 更新
 
+**一键（Windows）：** 双击 `deploy.bat`（需已安装 Node.js；首次会打开浏览器登录 Cloudflare）。
+
+或手动：
+
 ```bash
 npx wrangler login
 cd cloudflare
 npx wrangler deploy
 ```
 
-首次启用 Durable Objects 时，`wrangler deploy` 会自动应用 migration `v1`（创建 `Room` 类）。
+首次启用 Durable Objects 时，`wrangler deploy` 会自动应用 migration `v1`（免费套餐使用 `new_sqlite_classes = ["Room"]`）。
 
 将输出的地址填入应用「跨网传文件」中的中转地址，例如：
 

@@ -3,11 +3,11 @@ main = "signaling-worker.js"
 compatibility_date = "2024-11-01"
 
 # Durable Objects keep both peers in the same room (required for reliable pairing).
-# Without this, Cloudflare may put sender/receiver on different isolates → forever timeout.
 [[durable_objects.bindings]]
 name = "ROOMS"
 class_name = "Room"
 
+# Free plan: must use new_sqlite_classes (not new_classes)
 [[migrations]]
 tag = "v1"
-new_classes = ["Room"]
+new_sqlite_classes = ["Room"]
