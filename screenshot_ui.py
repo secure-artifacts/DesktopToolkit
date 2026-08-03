@@ -106,6 +106,8 @@ class HotkeyCaptureEdit(QLineEdit):
     """Click / focus, then press a combo — auto-fills e.g. Ctrl+Alt+A."""
 
     hotkey_captured = pyqtSignal(str)
+    capture_started = pyqtSignal()
+    capture_ended = pyqtSignal()
 
     def __init__(self, placeholder: str = "", parent=None):
         super().__init__(parent)
@@ -114,6 +116,7 @@ class HotkeyCaptureEdit(QLineEdit):
         self.setToolTip("点击此框，然后直接按下想要的组合键（如 Ctrl+Alt+A）")
         self._listening = False
         self._saved = ""
+        self._grabbed = False
 
     def focusInEvent(self, event) -> None:
         super().focusInEvent(event)
@@ -124,12 +127,25 @@ class HotkeyCaptureEdit(QLineEdit):
             "border-radius:10px; padding:8px 10px; min-height:28px; font-weight:700; }"
         )
         self.setPlaceholderText("请按下快捷键…（Esc 取消）")
+        self.capture_started.emit()
+        try:
+            self.grabKeyboard()
+            self._grabbed = True
+        except Exception:
+            self._grabbed = False
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
         self._listening = False
         self.setStyleSheet("")
         self.setPlaceholderText("点击后按下快捷键…")
+        if self._grabbed:
+            try:
+                self.releaseKeyboard()
+            except Exception:
+                pass
+            self._grabbed = False
+        self.capture_ended.emit()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -235,7 +251,7 @@ class FloatingScreenshotBoard(QWidget):
 
         tip = QLabel(
             "区域截图：坐标十字瞄准 → 拖选范围 → 图标工具连续标注 →\n"
-            "复制 / 保存 / 钉桌面 / 上传云端（链接自动进剪贴板，无弹窗）。"
+            "复制 / 保存 / 钉桌面 / 上传云端 完成后自动退出（链接自动进剪贴板）。"
         )
         tip.setObjectName("muted")
         tip.setWordWrap(True)
@@ -255,21 +271,29 @@ class FloatingScreenshotBoard(QWidget):
         hk_row1.addWidget(QLabel("区域"))
         self.txt_hk_region = HotkeyCaptureEdit("点击后按下区域截图快捷键…")
         self.txt_hk_region.hotkey_captured.connect(lambda _c: self._on_hotkey_captured("region"))
+        self.txt_hk_region.capture_started.connect(self._pause_global_hotkeys)
+        self.txt_hk_region.capture_ended.connect(self._on_capture_ended)
         hk_row1.addWidget(self.txt_hk_region, 1)
         lay.addLayout(hk_row1)
         hk_row2 = QHBoxLayout()
         hk_row2.addWidget(QLabel("全屏"))
         self.txt_hk_full = HotkeyCaptureEdit("点击后按下全屏截图快捷键…")
         self.txt_hk_full.hotkey_captured.connect(lambda _c: self._on_hotkey_captured("full"))
+        self.txt_hk_full.capture_started.connect(self._pause_global_hotkeys)
+        self.txt_hk_full.capture_ended.connect(self._on_capture_ended)
         hk_row2.addWidget(self.txt_hk_full, 1)
         lay.addLayout(hk_row2)
         btn_hk = QPushButton("应用快捷键", objectName="soft")
         btn_hk.clicked.connect(self._apply_hotkeys)
         lay.addWidget(btn_hk)
-        self.lbl_hk = QLabel("用法：点输入框变蓝后，按下 Ctrl+Alt+字母 等组合，自动填入。Delete 清空。")
+        self.lbl_hk = QLabel(
+            "用法：点输入框变蓝后，按下 Ctrl+Alt+字母 等组合，自动填入并生效。Delete 清空。\n"
+            "录入时会暂时释放系统快捷键，避免被旧组合抢走按键。"
+        )
         self.lbl_hk.setObjectName("muted")
         self.lbl_hk.setWordWrap(True)
         lay.addWidget(self.lbl_hk)
+        self._hk_applying = False
 
         lay.addWidget(QLabel("本地保存目录"))
         path_row = QHBoxLayout()
@@ -380,6 +404,22 @@ class FloatingScreenshotBoard(QWidget):
         f = self.txt_hk_full.text().strip() or "Ctrl+Alt+Shift+A"
         self.lbl_hk.setText(f"当前：区域 {r} · 全屏 {f}（冲突可改组合后点「应用快捷键」）")
 
+    def _pause_global_hotkeys(self) -> None:
+        try:
+            if self.callbacks and hasattr(self.callbacks, "pause_screenshot_hotkeys"):
+                self.callbacks.pause_screenshot_hotkeys()
+        except Exception:
+            pass
+
+    def _on_capture_ended(self) -> None:
+        if getattr(self, "_hk_applying", False):
+            return
+        try:
+            if self.callbacks and hasattr(self.callbacks, "resume_screenshot_hotkeys"):
+                self.callbacks.resume_screenshot_hotkeys()
+        except Exception:
+            pass
+
     def _on_hotkey_captured(self, which: str) -> None:
         """Auto-save and rebind as soon as user presses a combo."""
         self._apply_hotkeys()
@@ -388,17 +428,21 @@ class FloatingScreenshotBoard(QWidget):
         self.lbl_status.setText(f"已录入{'区域' if which == 'region' else '全屏'}快捷键 · 区域 {r} · 全屏 {f}")
 
     def _apply_hotkeys(self) -> None:
-        self._save()
+        self._hk_applying = True
         try:
-            if self.callbacks and hasattr(self.callbacks, "rebind_screenshot_hotkeys"):
-                msg = self.callbacks.rebind_screenshot_hotkeys()
-                self.lbl_status.setText(str(msg or "快捷键已更新"))
-                self.lbl_hk.setText(str(msg or self.lbl_hk.text()))
-            else:
-                self.lbl_status.setText("已保存快捷键（重启应用后生效）")
-        except Exception as e:
-            self.lbl_status.setText(f"应用快捷键失败：{e}")
-        self._update_tip_hotkeys()
+            self._save()
+            try:
+                if self.callbacks and hasattr(self.callbacks, "rebind_screenshot_hotkeys"):
+                    msg = self.callbacks.rebind_screenshot_hotkeys()
+                    self.lbl_status.setText(str(msg or "快捷键已更新"))
+                    self.lbl_hk.setText(str(msg or self.lbl_hk.text()))
+                else:
+                    self.lbl_status.setText("已保存快捷键（重启应用后生效）")
+            except Exception as e:
+                self.lbl_status.setText(f"应用快捷键失败：{e}")
+            self._update_tip_hotkeys()
+        finally:
+            self._hk_applying = False
 
     def _save(self) -> None:
         cfg = self._cfg()

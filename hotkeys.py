@@ -116,11 +116,35 @@ class ToolkitHotkeys:
                 pass
         self._ids.clear()
 
+    def _unregister_shots(self) -> None:
+        u = _user32()
+        if not u:
+            return
+        for hid in (HOTKEY_SHOT_REGION, HOTKEY_SHOT_FULL):
+            try:
+                u.UnregisterHotKey(None, hid)
+            except Exception:
+                pass
+            if hid in self._ids:
+                self._ids.remove(hid)
+
     def _register_all(self) -> None:
         u = _user32()
         if not u:
             return
         self._unregister()
+        import ctypes
+
+        try:
+            u.RegisterHotKey.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_uint,
+                ctypes.c_uint,
+            ]
+            u.RegisterHotKey.restype = wintypes.BOOL
+        except Exception:
+            pass
         for hid, combo, default in (
             (HOTKEY_HUB, self.hub_combo, (MOD_CONTROL | MOD_ALT, ord("T"))),
             (HOTKEY_SHOT_REGION, self.region_combo, (MOD_CONTROL | MOD_ALT, ord("A"))),
@@ -128,7 +152,37 @@ class ToolkitHotkeys:
         ):
             parsed = parse_hotkey_combo(combo) or default
             mods, vk = parsed
-            if u.RegisterHotKey(None, hid, mods, vk):
+            if u.RegisterHotKey(None, hid, int(mods), int(vk)):
+                self._ids.append(hid)
+
+    def pause_screenshot_hotkeys(self) -> None:
+        """Free shot combos so capture widgets can receive those keys."""
+        self._unregister_shots()
+
+    def resume_screenshot_hotkeys(self) -> None:
+        u = _user32()
+        if not u:
+            return
+        self._unregister_shots()
+        import ctypes
+
+        try:
+            u.RegisterHotKey.argtypes = [
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_uint,
+                ctypes.c_uint,
+            ]
+            u.RegisterHotKey.restype = wintypes.BOOL
+        except Exception:
+            pass
+        for hid, combo, default in (
+            (HOTKEY_SHOT_REGION, self.region_combo, (MOD_CONTROL | MOD_ALT, ord("A"))),
+            (HOTKEY_SHOT_FULL, self.full_combo, (MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord("A"))),
+        ):
+            parsed = parse_hotkey_combo(combo) or default
+            mods, vk = parsed
+            if u.RegisterHotKey(None, hid, int(mods), int(vk)):
                 self._ids.append(hid)
 
     def rebind(self, hub: str | None = None, region: str | None = None, full: str | None = None) -> str:
@@ -139,9 +193,11 @@ class ToolkitHotkeys:
         if full is not None:
             self.full_combo = full
         self._register_all()
+        r_ok = HOTKEY_SHOT_REGION in self._ids
+        f_ok = HOTKEY_SHOT_FULL in self._ids
         return (
-            f"面板 {self.hub_combo} · 区域 {self.region_combo} · 全屏 {self.full_combo} "
-            f"({'OK' if self._ids else '注册失败'})"
+            f"面板 {self.hub_combo} · 区域 {self.region_combo}:{'OK' if r_ok else '失败'} · "
+            f"全屏 {self.full_combo}:{'OK' if f_ok else '失败'}"
         )
 
     def close(self) -> None:

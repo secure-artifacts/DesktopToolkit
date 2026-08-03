@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 
 # Bump when shipping a new installer.
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 # Public releases channel (organization repo — no personal account)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"

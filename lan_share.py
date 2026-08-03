@@ -54,15 +54,35 @@ def local_ipv4_addresses() -> list[str]:
     return found
 
 
+# PBKDF2 iterations — CodeQL requires a slow KDF for password hashing (not raw SHA-256).
+_PBKDF2_ITERS = 200_000
+
+
 def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
-    salt = salt or secrets.token_hex(8)
-    digest = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    """Return (salt_hex, digest_hex) using PBKDF2-HMAC-SHA256."""
+    if salt is None:
+        salt_bytes = secrets.token_bytes(16)
+        salt = salt_bytes.hex()
+    else:
+        try:
+            salt_bytes = bytes.fromhex(salt)
+        except ValueError:
+            salt_bytes = salt.encode("utf-8")
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        (password or "").encode("utf-8"),
+        salt_bytes,
+        _PBKDF2_ITERS,
+    ).hex()
     return salt, digest
 
 
 def verify_password(password: str, salt: str, digest: str) -> bool:
-    _, check = hash_password(password, salt)
-    return secrets.compare_digest(check, digest)
+    try:
+        _, check = hash_password(password, salt)
+        return secrets.compare_digest(check, digest or "")
+    except Exception:
+        return False
 
 
 def _safe_join(root: Path, rel: str) -> Path | None:
@@ -111,7 +131,9 @@ def _query_path(qs: dict[str, list[str]]) -> str:
 class _ShareHandler(BaseHTTPRequestHandler):
     # Set by LanShareServer before serving
     share_root: Path = Path(".")
-    password_plain: str = ""
+    # Password is stored only as PBKDF2 salt+digest (never plaintext on the handler).
+    password_salt: str = ""
+    password_digest: str = ""
     token: str = ""
     log_callback: Callable[[str], None] | None = None
 
@@ -122,33 +144,30 @@ class _ShareHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _credential_ok(self, provided: str) -> bool:
+        if not provided:
+            return False
+        # Session token is high-entropy random — constant-time compare is enough.
+        if self.token and secrets.compare_digest(provided, self.token):
+            return True
+        if self.password_salt and self.password_digest:
+            return verify_password(provided, self.password_salt, self.password_digest)
+        return False
+
     def _auth_ok(self) -> bool:
         # Accept Authorization: Bearer <token|password> or X-Share-Password / X-Share-Token
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
-            provided = auth[7:].strip()
-            if provided and (
-                secrets.compare_digest(provided, self.token)
-                or secrets.compare_digest(provided, self.password_plain)
-            ):
+            if self._credential_ok(auth[7:].strip()):
                 return True
         for header in ("X-Share-Token", "X-Share-Password"):
-            provided = (self.headers.get(header) or "").strip()
-            if provided and (
-                secrets.compare_digest(provided, self.token)
-                or secrets.compare_digest(provided, self.password_plain)
-            ):
+            if self._credential_ok((self.headers.get(header) or "").strip()):
                 return True
         # Also allow ?token= for simple browser probes
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
         provided = (qs.get("token") or qs.get("password") or [""])[0]
-        if provided and (
-            secrets.compare_digest(provided, self.token)
-            or secrets.compare_digest(provided, self.password_plain)
-        ):
-            return True
-        return False
+        return self._credential_ok(provided)
 
     def _send_json(self, code: int, payload: dict[str, Any]) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -432,12 +451,14 @@ class LanShareServer:
                 return "端口请使用 1024–65535。"
 
             token = secrets.token_urlsafe(16)
+            pwd_salt, pwd_digest = hash_password(pwd)
             handler = type(
                 "BoundShareHandler",
                 (_ShareHandler,),
                 {
                     "share_root": folder.resolve(),
-                    "password_plain": pwd,
+                    "password_salt": pwd_salt,
+                    "password_digest": pwd_digest,
                     "token": token,
                     "log_callback": staticmethod(log_callback) if log_callback else None,
                 },

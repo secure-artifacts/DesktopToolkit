@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -235,6 +235,8 @@ class ScreenshotEditor(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # Keep mouse events even after clicking toolbar buttons
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        # Tool windows often miss wheel without focus — track app-level wheels while open
+        self._wheel_filter_installed = False
 
         # phase: "select" = aim crosshair + drag region; "edit" = multi-tool annotation
         # (Flameshot-style: stay in edit until save/exit/cancel — never auto re-select)
@@ -320,26 +322,106 @@ class ScreenshotEditor(QWidget):
         self.update()
 
     def _set_width(self, w: int) -> None:
+        old = self.pen_w
         self.pen_w = max(1, min(40, int(w)))
+        if self.pen_w == old and self.phase == "edit":
+            self._status_hint = f"粗细 {self.pen_w} · 滚轮可调"
+            self.update()
+            return
         self._status_hint = f"粗细 {self.pen_w} · 滚轮可调"
         if self.phase == "edit":
-            self._rebuild_dock()
+            try:
+                self._rebuild_dock()
+            except Exception:
+                pass
         self.update()
+
+    def _install_wheel_filter(self) -> None:
+        app = QApplication.instance()
+        if app is None or self._wheel_filter_installed:
+            return
+        app.installEventFilter(self)
+        self._wheel_filter_installed = True
+
+    def _remove_wheel_filter(self) -> None:
+        app = QApplication.instance()
+        if app is None or not self._wheel_filter_installed:
+            return
+        try:
+            app.removeEventFilter(self)
+        except Exception:
+            pass
+        self._wheel_filter_installed = False
+
+    def showEvent(self, e) -> None:  # type: ignore[override]
+        super().showEvent(e)
+        self._install_wheel_filter()
+        self.activateWindow()
+        self.raise_()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
+
+    def closeEvent(self, e) -> None:  # type: ignore[override]
+        self._remove_wheel_filter()
+        super().closeEvent(e)
+
+    def hideEvent(self, e) -> None:  # type: ignore[override]
+        self._remove_wheel_filter()
+        super().hideEvent(e)
+
+    def enterEvent(self, e) -> None:  # type: ignore[override]
+        super().enterEvent(e)
+        self.activateWindow()
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def event(self, e) -> bool:  # type: ignore[override]
+        if e.type() == QEvent.Type.Wheel:
+            self.wheelEvent(e)  # type: ignore[arg-type]
+            return True
+        return super().event(e)
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if not self.isVisible():
+            return False
+        if event.type() != QEvent.Type.Wheel:
+            return False
+        if self.phase != "edit":
+            return False
+        if self._text_input_active():
+            return False
+        try:
+            gp = QCursor.pos()
+            if not self.frameGeometry().contains(gp):
+                return False
+        except Exception:
+            pass
+        self.wheelEvent(event)  # type: ignore[arg-type]
+        return True
 
     def wheelEvent(self, e: QWheelEvent) -> None:  # type: ignore[override]
         """Mouse wheel adjusts brush thickness (edit mode)."""
         if self.phase != "edit":
-            super().wheelEvent(e)
+            try:
+                super().wheelEvent(e)
+            except Exception:
+                pass
             return
-        # Prefer vertical angleDelta; fall back to pixelDelta for trackpads
+        if self._text_input_active():
+            try:
+                super().wheelEvent(e)
+            except Exception:
+                pass
+            return
         delta = int(e.angleDelta().y())
+        if delta == 0:
+            delta = int(e.angleDelta().x())
         if delta == 0:
             delta = int(e.pixelDelta().y())
         if delta == 0:
+            delta = int(e.pixelDelta().x())
+        if delta == 0:
             e.accept()
             return
-        # One notch ≈ 120; multi-notch or trackpad swipe scales a bit
-        step = max(1, min(4, abs(delta) // 120 or 1))
+        step = max(1, min(4, abs(delta) // 120 if abs(delta) >= 120 else 1))
         if delta > 0:
             self._set_width(self.pen_w + step)
         else:
@@ -756,12 +838,13 @@ class ScreenshotEditor(QWidget):
         p.setPen(pen)
         if st.kind in ("pen", "marker"):
             if len(st.points) >= 2:
-                path = QPainterPath(st.points[0])
-                for pt in st.points[1:]:
-                    path.lineTo(pt)
+                path = self._smooth_stroke_path(st.points)
                 p.drawPath(path)
             elif len(st.points) == 1:
-                p.drawPoint(st.points[0])
+                r = max(0.5, st.width / 2.0)
+                p.setBrush(QBrush(col))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(st.points[0], r, r)
         elif st.kind == "arrow" and len(st.points) >= 2:
             a, b = st.points[0], st.points[-1]
             p.drawLine(a, b)
@@ -1109,7 +1192,7 @@ class ScreenshotEditor(QWidget):
             if self.drawing and self.cur_stroke:
                 pos = self._clamp_to_sel(pos)
                 if self.cur_stroke.kind in ("pen", "marker"):
-                    self.cur_stroke.points.append(QPointF(pos))
+                    self._append_freehand_point(self.cur_stroke, QPointF(pos))
                 else:
                     if len(self.cur_stroke.points) == 1:
                         self.cur_stroke.points.append(QPointF(pos))
@@ -1134,6 +1217,9 @@ class ScreenshotEditor(QWidget):
             st = self.cur_stroke
             self.cur_stroke = None
             self.drawing = False
+            if st.kind in ("pen", "marker"):
+                end = self._clamp_to_sel(e.position().toPoint())
+                self._append_freehand_point(st, QPointF(end), min_dist=0.5)
             if st.kind in ("pixelate", "blur") and len(st.points) >= 2:
                 self._bake_region_effect(st)
             if st.kind in ("pen", "marker") and len(st.points) < 1:
@@ -1220,6 +1306,43 @@ class ScreenshotEditor(QWidget):
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    @staticmethod
+    def _append_freehand_point(stroke: Stroke, pt: QPointF, min_dist: float = 2.5) -> None:
+        pts = stroke.points
+        if not pts:
+            pts.append(pt)
+            return
+        last = pts[-1]
+        dx = pt.x() - last.x()
+        dy = pt.y() - last.y()
+        if dx * dx + dy * dy < min_dist * min_dist:
+            return
+        pts.append(pt)
+
+    @staticmethod
+    def _smooth_stroke_path(points: list[QPointF]) -> QPainterPath:
+        if not points:
+            return QPainterPath()
+        if len(points) == 1:
+            return QPainterPath(points[0])
+        if len(points) == 2:
+            path = QPainterPath(points[0])
+            path.lineTo(points[1])
+            return path
+        path = QPainterPath(points[0])
+        for i in range(1, len(points) - 1):
+            mid = QPointF(
+                (points[i].x() + points[i + 1].x()) * 0.5,
+                (points[i].y() + points[i + 1].y()) * 0.5,
+            )
+            path.quadTo(points[i], mid)
+        path.lineTo(points[-1])
+        return path
+
+    def _finish_ok(self, img: QImage) -> None:
+        self.finished.emit(img)
+        self.close()
+
     def _on_action(self, act: str) -> None:
         if act == "cancel":
             self.finished.emit(None)
@@ -1258,8 +1381,7 @@ class ScreenshotEditor(QWidget):
             return
         if act == "copy":
             QApplication.clipboard().setImage(img)
-            self._status_hint = "已复制到剪贴板 · 可继续编辑，不会退出"
-            self.update()
+            self._finish_ok(img)
             return
         if act == "save":
             path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
@@ -1269,8 +1391,7 @@ class ScreenshotEditor(QWidget):
             if chosen:
                 img.save(chosen)
                 self.cfg["last_save"] = chosen
-                self._status_hint = f"已保存 {Path(chosen).name} · 可继续编辑"
-                self.update()
+                self._finish_ok(img)
             return
         if act == "pin":
             pm = QPixmap.fromImage(img)
@@ -1278,8 +1399,7 @@ class ScreenshotEditor(QWidget):
             pin.move(self.desk_geo.x() + self.sel.x() + 20, self.desk_geo.y() + self.sel.y() + 20)
             pin.show()
             self._pinned.append(pin)
-            self._status_hint = "已钉在桌面 · 编辑器仍可继续标注"
-            self.update()
+            self._finish_ok(img)
             return
         if act == "upload":
             if not self.on_upload:
@@ -1294,10 +1414,7 @@ class ScreenshotEditor(QWidget):
                 self._last_upload_link = link
                 if link:
                     QApplication.clipboard().setText(link)
-                    self._status_hint = f"✅ 已上传并复制链接到剪贴板 · {name or link[:48]}"
-                else:
-                    self._status_hint = f"✅ 已上传 · {name or '完成'}"
-                self.update()
+                self._finish_ok(img)
             except Exception as e:
                 self._status_hint = f"上传失败：{e}"
                 self.update()
@@ -1322,8 +1439,7 @@ class ScreenshotEditor(QWidget):
                         self._last_upload_link = link
                 except Exception:
                     pass
-            self.finished.emit(img)
-            self.close()
+            self._finish_ok(img)
             return
 
     def closeEvent(self, e) -> None:

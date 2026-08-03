@@ -112,7 +112,7 @@ class MainWindow(QMainWindow):
 
             ver = QLabel(f"v{_VER}")
         except Exception:
-            ver = QLabel("v1.0.6")
+            ver = QLabel("v1.0.7")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -302,16 +302,21 @@ class MainWindow(QMainWindow):
         row.addWidget(self.txt_shot_dir, 1)
         row.addWidget(bd)
         rl.addLayout(row)
-        rl.addWidget(QLabel("区域快捷键（点框后按键）"))
+        rl.addWidget(QLabel("区域快捷键（点框后按键；录入时会暂时释放系统快捷键）"))
         self.hk_region = HotkeyCaptureEdit()
         self.hk_region.setText(str(cfg.get("hotkey_region") or "Ctrl+Alt+A"))
         self.hk_region.hotkey_captured.connect(lambda _c: self._save_shot_settings(True))
+        self.hk_region.capture_started.connect(self._pause_shot_hotkeys)
+        self.hk_region.capture_ended.connect(self._on_hk_capture_ended)
         rl.addWidget(self.hk_region)
         rl.addWidget(QLabel("全屏快捷键"))
         self.hk_full = HotkeyCaptureEdit()
         self.hk_full.setText(str(cfg.get("hotkey_full") or "Ctrl+Alt+Shift+A"))
         self.hk_full.hotkey_captured.connect(lambda _c: self._save_shot_settings(True))
+        self.hk_full.capture_started.connect(self._pause_shot_hotkeys)
+        self.hk_full.capture_ended.connect(self._on_hk_capture_ended)
         rl.addWidget(self.hk_full)
+        self._hk_applying = False
         g = cfg.setdefault("gdrive", {})
         self.chk_gdrive = QCheckBox("启用 Google 云端上传")
         self.chk_gdrive.setChecked(bool(g.get("enabled")))
@@ -350,24 +355,42 @@ class MainWindow(QMainWindow):
         if p:
             self.txt_secrets.setText(p)
 
+    def _pause_shot_hotkeys(self) -> None:
+        try:
+            self.host.pause_screenshot_hotkeys()
+        except Exception:
+            pass
+
+    def _on_hk_capture_ended(self) -> None:
+        if getattr(self, "_hk_applying", False):
+            return
+        try:
+            self.host.resume_screenshot_hotkeys()
+        except Exception:
+            pass
+
     def _save_shot_settings(self, apply_hk: bool = False) -> None:
-        cfg = self.host.store.state.setdefault("screenshot", {})
-        g = cfg.setdefault("gdrive", {})
-        cfg["save_dir"] = self.txt_shot_dir.text().strip()
-        cfg["hotkey_region"] = self.hk_region.text().strip() or "Ctrl+Alt+A"
-        cfg["hotkey_full"] = self.hk_full.text().strip() or "Ctrl+Alt+Shift+A"
-        cfg["auto_upload"] = self.chk_auto_up.isChecked()
-        g["enabled"] = self.chk_gdrive.isChecked()
-        g["client_secrets_path"] = self.txt_secrets.text().strip()
-        g["folder_id"] = self.txt_folder.text().strip()
-        self.host.store.save_state()
-        msg = "已保存"
-        if apply_hk:
-            try:
-                msg = self.host.rebind_screenshot_hotkeys() or msg
-            except Exception as e:
-                msg = str(e)
-        self.lbl_shot_status.setText(msg)
+        self._hk_applying = True
+        try:
+            cfg = self.host.store.state.setdefault("screenshot", {})
+            g = cfg.setdefault("gdrive", {})
+            cfg["save_dir"] = self.txt_shot_dir.text().strip()
+            cfg["hotkey_region"] = self.hk_region.text().strip() or "Ctrl+Alt+A"
+            cfg["hotkey_full"] = self.hk_full.text().strip() or "Ctrl+Alt+Shift+A"
+            cfg["auto_upload"] = self.chk_auto_up.isChecked()
+            g["enabled"] = self.chk_gdrive.isChecked()
+            g["client_secrets_path"] = self.txt_secrets.text().strip()
+            g["folder_id"] = self.txt_folder.text().strip()
+            self.host.store.save_state()
+            msg = "已保存"
+            if apply_hk:
+                try:
+                    msg = self.host.rebind_screenshot_hotkeys() or msg
+                except Exception as e:
+                    msg = str(e)
+            self.lbl_shot_status.setText(msg)
+        finally:
+            self._hk_applying = False
 
     def _page_record(self) -> QWidget:
         from recorder_ui import FloatingRecorderBoard
@@ -564,7 +587,7 @@ class MainWindow(QMainWindow):
 
             ver_txt = APP_VERSION
         except Exception:
-            ver_txt = "1.0.5"
+            ver_txt = "1.0.7"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)

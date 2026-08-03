@@ -99,6 +99,8 @@ class ToolkitApp(QObject):
         return SimpleNamespace(
             save_state=self.store.save_state,
             rebind_screenshot_hotkeys=self.rebind_screenshot_hotkeys,
+            pause_screenshot_hotkeys=self.pause_screenshot_hotkeys,
+            resume_screenshot_hotkeys=self.resume_screenshot_hotkeys,
         )
 
     def _prefs(self) -> dict:
@@ -199,6 +201,18 @@ class ToolkitApp(QObject):
         )
         self.store.save_state()
         return msg
+
+    def pause_screenshot_hotkeys(self) -> None:
+        try:
+            self.hotkeys.pause_screenshot_hotkeys()
+        except Exception:
+            pass
+
+    def resume_screenshot_hotkeys(self) -> None:
+        try:
+            self.hotkeys.resume_screenshot_hotkeys()
+        except Exception:
+            pass
 
     def show_recorder_board(self) -> None:
         from recorder_ui import FloatingRecorderBoard
