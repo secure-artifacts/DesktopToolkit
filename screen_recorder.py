@@ -206,6 +206,137 @@ def get_audio_devices() -> tuple[list[dict], list[dict]]:
     return mics, systems
 
 
+class MicTester:
+    """Live mic level + short buffer for debug (pick the right input device)."""
+
+    def __init__(
+        self,
+        *,
+        on_level: Callable[[float], None] | None = None,
+        on_status: Callable[[str], None] | None = None,
+        sample_rate: int = 44100,
+        buffer_seconds: float = 4.0,
+    ) -> None:
+        self.on_level = on_level or (lambda _v: None)
+        self.on_status = on_status or (lambda _m: None)
+        self.sample_rate = int(sample_rate)
+        self.buffer_seconds = float(buffer_seconds)
+        self._stream: sd.InputStream | None = None
+        self._lock = threading.Lock()
+        self._chunks: list[np.ndarray] = []
+        self._max_samples = max(1, int(self.sample_rate * self.buffer_seconds))
+        self._playing = False
+        self.device_idx: int | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._stream is not None
+
+    def start(self, device_idx: int) -> None:
+        self.stop()
+        self.device_idx = int(device_idx)
+        self._chunks = []
+        try:
+            info = sd.query_devices(self.device_idx)
+            ch = max(1, min(2, int(info.get("max_input_channels") or 1)))
+        except Exception:
+            ch = 1
+
+        def _cb(indata, frames, time_info, status):  # noqa: ARG001
+            if status:
+                pass
+            try:
+                mono = np.asarray(indata, dtype=np.float32)
+                if mono.ndim > 1:
+                    mono = mono.mean(axis=1)
+                peak = float(np.max(np.abs(mono))) if mono.size else 0.0
+                # Map peak to 0..100 with mild log feel for quiet speech
+                level = min(100.0, peak * 140.0)
+                self.on_level(level)
+                with self._lock:
+                    self._chunks.append(mono.copy())
+                    total = sum(c.size for c in self._chunks)
+                    while total > self._max_samples and self._chunks:
+                        dropped = self._chunks.pop(0)
+                        total -= dropped.size
+            except Exception:
+                pass
+
+        try:
+            self._stream = sd.InputStream(
+                device=self.device_idx,
+                channels=ch,
+                samplerate=self.sample_rate,
+                dtype="float32",
+                blocksize=1024,
+                callback=_cb,
+            )
+            self._stream.start()
+            name = ""
+            try:
+                name = str(sd.query_devices(self.device_idx).get("name") or "")
+            except Exception:
+                pass
+            self.on_status(f"🎤 试听中：{name or f'设备 {self.device_idx}'} — 请对着说话看电平")
+        except Exception as exc:
+            self._stream = None
+            self.on_status(f"无法打开麦克风：{exc}")
+            raise
+
+    def stop(self) -> None:
+        stream = self._stream
+        self._stream = None
+        if stream is not None:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        self.on_level(0.0)
+
+    def snapshot_audio(self) -> np.ndarray | None:
+        with self._lock:
+            if not self._chunks:
+                return None
+            return np.concatenate(self._chunks).astype(np.float32, copy=False)
+
+    def play_buffer_async(self) -> None:
+        """Play the last few seconds captured during the test (for device debug)."""
+        if self._playing:
+            self.on_status("正在回放，请稍候…")
+            return
+        data = self.snapshot_audio()
+        if data is None or data.size < self.sample_rate // 10:
+            self.on_status("缓冲太短：请先点「开始试听」并说几句话，再回放")
+            return
+
+        def _run() -> None:
+            self._playing = True
+            try:
+                # stop input briefly to avoid feedback if speakers loud
+                was = self.is_running
+                dev = self.device_idx
+                if was:
+                    self.stop()
+                self.on_status(f"▶ 回放约 {data.size / self.sample_rate:.1f}s…")
+                sd.play(data, self.sample_rate, blocking=True)
+                self.on_status("✅ 回放结束。有声音 = 该输入可用")
+                if was and dev is not None:
+                    try:
+                        self.start(dev)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self.on_status(f"回放失败：{exc}")
+            finally:
+                self._playing = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+
 def _ffmpeg_bin() -> str:
     try:
         import imageio_ffmpeg

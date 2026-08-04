@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -47,6 +48,7 @@ class _PreviewBridge(QObject):
     frame = pyqtSignal(object)  # numpy BGR
     status = pyqtSignal(str)
     finished = pyqtSignal(str)
+    mic_level = pyqtSignal(float)  # 0..100
 
 
 class RecordingDrawOverlay(QWidget):
@@ -466,8 +468,10 @@ class FloatingRecorderBoard(QWidget):
         self._bridge.frame.connect(self._on_preview_frame)
         self._bridge.status.connect(self._set_status)
         self._bridge.finished.connect(self._on_save_finished)
+        self._bridge.mic_level.connect(self._on_mic_level)
         self._cursor_color = QColor(255, 220, 40)
         self._busy_stop = False
+        self._mic_tester: screen_recorder.MicTester | None = None
         self.control_bar = RecordingControlBar(self)
 
         if not embedded:
@@ -611,12 +615,40 @@ class FloatingRecorderBoard(QWidget):
 
         form.addWidget(QLabel("麦克风"), 3, 0)
         self.cmb_mic = QComboBox()
+        self.cmb_mic.setToolTip("选不同输入设备后可用下方「试听」确认能否录入你的声音")
         form.addWidget(self.cmb_mic, 3, 1, 1, 3)
 
         form.addWidget(QLabel("系统声音"), 4, 0)
         self.cmb_sys = QComboBox()
         form.addWidget(self.cmb_sys, 4, 1, 1, 3)
         lay.addLayout(form)
+
+        # Mic debug: level meter + short buffer playback
+        mic_test = QHBoxLayout()
+        self.btn_mic_test = QPushButton("试听麦克风", objectName="soft")
+        self.btn_mic_test.setCheckable(True)
+        self.btn_mic_test.setToolTip("开始后对着麦克风说话，看右侧电平条是否跳动")
+        self.btn_mic_test.clicked.connect(self._toggle_mic_test)
+        self.btn_mic_play = QPushButton("回放刚才", objectName="soft")
+        self.btn_mic_play.setToolTip("播放试听期间录下的最近几秒，确认扬声器能听到")
+        self.btn_mic_play.clicked.connect(self._play_mic_buffer)
+        self.mic_level = QProgressBar()
+        self.mic_level.setRange(0, 100)
+        self.mic_level.setValue(0)
+        self.mic_level.setTextVisible(True)
+        self.mic_level.setFormat("电平 %v%")
+        self.mic_level.setMinimumHeight(22)
+        self.mic_level.setToolTip("说话时应变绿/变高；一直为 0 = 选错设备或被系统静音")
+        mic_test.addWidget(self.btn_mic_test)
+        mic_test.addWidget(self.btn_mic_play)
+        mic_test.addWidget(self.mic_level, 1)
+        lay.addLayout(mic_test)
+        self.lbl_mic_hint = QLabel(
+            "调试：换麦克风设备 → 点「试听麦克风」说话看电平 → 可选「回放刚才」听是否录入。"
+        )
+        self.lbl_mic_hint.setObjectName("muted")
+        self.lbl_mic_hint.setWordWrap(True)
+        lay.addWidget(self.lbl_mic_hint)
 
         # Cursor / brush widgets (settings defaults; live controls also on floating bar)
         self.chk_cursor = QCheckBox("录制时高亮鼠标指针")
@@ -969,9 +1001,75 @@ class FloatingRecorderBoard(QWidget):
             self.overlay.show()
         self.overlay.raise_()
 
+    def _on_mic_level(self, level: float) -> None:
+        try:
+            v = int(max(0, min(100, level)))
+            self.mic_level.setValue(v)
+            # Color hint: grey idle, green when speaking
+            if v < 3:
+                col = "#334155"
+            elif v < 25:
+                col = "#0ea5e9"
+            else:
+                col = "#22c55e"
+            self.mic_level.setStyleSheet(
+                f"QProgressBar {{ border:1px solid #334155; border-radius:6px; text-align:center; color:#e2e8f0; }}"
+                f"QProgressBar::chunk {{ background:{col}; border-radius:5px; }}"
+            )
+        except Exception:
+            pass
+
+    def _stop_mic_test(self) -> None:
+        if self._mic_tester is not None:
+            try:
+                self._mic_tester.stop()
+            except Exception:
+                pass
+            self._mic_tester = None
+        if hasattr(self, "btn_mic_test"):
+            self.btn_mic_test.setChecked(False)
+            self.btn_mic_test.setText("试听麦克风")
+        if hasattr(self, "mic_level"):
+            self.mic_level.setValue(0)
+
+    def _toggle_mic_test(self) -> None:
+        if self.recorder and self.recorder.is_recording:
+            self.btn_mic_test.setChecked(False)
+            self._set_status("录制中无法试听麦克风，请先停止录制")
+            return
+        if self.btn_mic_test.isChecked():
+            mic = self.cmb_mic.currentData()
+            if mic is None:
+                self.btn_mic_test.setChecked(False)
+                self._set_status("请先在「麦克风」里选择一个输入设备（不要选「不录制」）")
+                return
+            self._stop_mic_test()
+            self.btn_mic_test.setChecked(True)
+            self.btn_mic_test.setText("停止试听")
+            self._mic_tester = screen_recorder.MicTester(
+                on_level=lambda v: self._bridge.mic_level.emit(float(v)),
+                on_status=lambda m: self._bridge.status.emit(str(m)),
+            )
+            try:
+                self._mic_tester.start(int(mic))
+            except Exception as e:
+                self._stop_mic_test()
+                self._set_status(f"试听失败：{e}")
+        else:
+            self._stop_mic_test()
+            self._set_status("已停止麦克风试听（可用「回放刚才」验证）")
+
+    def _play_mic_buffer(self) -> None:
+        if self._mic_tester is None:
+            # Create a one-shot tester just for message
+            self._set_status("请先点「试听麦克风」说几句话，再点「回放刚才」")
+            return
+        self._mic_tester.play_buffer_async()
+
     def _start(self) -> None:
         if self.recorder and self.recorder.is_recording:
             return
+        self._stop_mic_test()  # free the mic device before real recording
         self._save_settings()
         target = self._current_target()
         if not target:
@@ -1209,6 +1307,7 @@ class FloatingRecorderBoard(QWidget):
         self._save_settings()
         # Don't kill active recording on accidental hide — only hide overlay if idle
         if not (self.recorder and self.recorder.is_recording):
+            self._stop_mic_test()
             if self.overlay:
                 self.overlay.hide()
         super().hideEvent(event)
@@ -1218,6 +1317,7 @@ class FloatingRecorderBoard(QWidget):
             self._set_status("请先停止录制再关闭")
             event.ignore()
             return
+        self._stop_mic_test()
         if self.overlay:
             self.overlay.hide()
             self.overlay.deleteLater()
