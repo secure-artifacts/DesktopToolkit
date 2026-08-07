@@ -36,6 +36,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QFileDialog,
     QHBoxLayout,
@@ -113,10 +114,13 @@ def capture_virtual_desktop() -> tuple[QPixmap, QRect]:
 class Stroke:
     kind: str  # pen|marker|arrow|rect|ellipse|text|number|pixelate|blur|fill
     points: list[QPointF] = field(default_factory=list)
-    color: QColor = field(default_factory=lambda: QColor(239, 68, 68))
-    width: float = 4.0
+    color: QColor = field(default_factory=lambda: QColor("#ff0000"))
+    width: float = 6.0
     text: str = ""
     number: int = 0
+    # text extras: readable labels on busy screenshots
+    bg_color: QColor | None = None  # None = no background fill
+    outline: bool = False  # dark outline around glyphs
     # for pixelate/blur: store processed pixmap of the rect region after apply
     baked: QImage | None = None
 
@@ -160,7 +164,7 @@ DOCK_ACTION_ROW: list[tuple[str, str, str, str]] = [
     ("cancel", "cancel", "取消", "action"),
 ]
 DOCK_COLORS = [
-    QColor(239, 68, 68),
+    QColor("#ff0000"),  # pure red — default pen
     QColor(249, 115, 22),
     QColor(234, 179, 8),
     QColor(34, 197, 94),
@@ -264,13 +268,18 @@ class ScreenshotEditor(QWidget):
             self.phase = "edit"
 
         self.tool = "pen"
-        self.color = QColor(239, 68, 68)
-        self.pen_w = 4  # brush thickness (not QWidget.width)
+        # Defaults: red #ff0000, width 6 — then restore user prefs from cfg
+        self.color = QColor("#ff0000")
+        self.pen_w = 6  # brush thickness (not QWidget.width)
+        self.text_bg = True
+        self.text_bg_color = QColor(0, 0, 0, 200)
+        self.text_outline = True
+        self._load_annot_prefs()
         self.drawing = False
         self.cur_stroke: Stroke | None = None
         self.strokes: list[Stroke] = []
         self.redo_stack: list[Stroke] = []
-        self.number_seq = 1
+        self.number_seq = 1  # kept in sync via _next_number()
         # Track cursor for Flameshot-style crosshair (local coords)
         try:
             gp = QCursor.pos()
@@ -393,25 +402,67 @@ class ScreenshotEditor(QWidget):
         self.activateWindow()
         self.setFocus(Qt.FocusReason.MouseFocusReason)
 
+    def _load_annot_prefs(self) -> None:
+        """Restore pen color/width + text label style from screenshot cfg."""
+        cfg = self.cfg if isinstance(self.cfg, dict) else {}
+        c = QColor(str(cfg.get("annot_color") or "#ff0000"))
+        self.color = c if c.isValid() else QColor("#ff0000")
+        try:
+            self.pen_w = max(1, min(40, int(cfg.get("annot_width") or 6)))
+        except (TypeError, ValueError):
+            self.pen_w = 6
+        self.text_bg = bool(cfg.get("annot_text_bg", True))
+        bg = QColor(str(cfg.get("annot_text_bg_color") or "#000000c8"))
+        self.text_bg_color = bg if bg.isValid() else QColor(0, 0, 0, 200)
+        self.text_outline = bool(cfg.get("annot_text_outline", True))
+
+    def _save_annot_prefs(self) -> None:
+        """Persist preferences so next capture keeps color/width/text style."""
+        if not isinstance(self.cfg, dict):
+            return
+        try:
+            self.cfg["annot_color"] = self.color.name(QColor.NameFormat.HexRgb)
+        except Exception:
+            self.cfg["annot_color"] = self.color.name()
+        self.cfg["annot_width"] = int(self.pen_w)
+        self.cfg["annot_text_bg"] = bool(self.text_bg)
+        try:
+            self.cfg["annot_text_bg_color"] = self.text_bg_color.name(QColor.NameFormat.HexArgb)
+        except Exception:
+            self.cfg["annot_text_bg_color"] = "#000000c8"
+        self.cfg["annot_text_outline"] = bool(self.text_outline)
+
     def _set_color(self, c: QColor) -> None:
         self.color = QColor(c)
-        self._status_hint = f"颜色 {self.color.name()}"
+        self._save_annot_prefs()
+        self._status_hint = f"颜色 {self.color.name()}（已记住）"
         self.update()
 
     def _set_width(self, w: int) -> None:
         old = self.pen_w
         self.pen_w = max(1, min(40, int(w)))
+        self._save_annot_prefs()
         if self.pen_w == old and self.phase == "edit":
-            self._status_hint = f"粗细 {self.pen_w} · 滚轮可调"
+            self._status_hint = f"粗细 {self.pen_w} · 滚轮可调（已记住）"
             self.update()
             return
-        self._status_hint = f"粗细 {self.pen_w} · 滚轮可调"
+        self._status_hint = f"粗细 {self.pen_w} · 滚轮可调（已记住）"
         if self.phase == "edit":
             try:
                 self._rebuild_dock()
             except Exception:
                 pass
         self.update()
+
+    def _next_number(self) -> int:
+        """Next serial for number stamps — always consecutive among current strokes.
+
+        Undo removes a number; the next stamp reuses that slot instead of skipping.
+        """
+        nums = [int(st.number) for st in self.strokes if st.kind == "number" and int(st.number) > 0]
+        n = (max(nums) if nums else 0) + 1
+        self.number_seq = n
+        return n
 
     def _install_wheel_filter(self) -> None:
         app = QApplication.instance()
@@ -949,9 +1000,38 @@ class ScreenshotEditor(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(r)
         elif st.kind == "text" and st.points:
-            p.setFont(QFont("Segoe UI", max(10, int(st.width * 3))))
-            p.setPen(col)
-            p.drawText(st.points[0], st.text or "")
+            text = st.text or ""
+            if not text:
+                return
+            fs = max(10, int(st.width * 3))
+            font = QFont("Segoe UI", fs, QFont.Weight.Bold)
+            p.setFont(font)
+            fm = p.fontMetrics()
+            pt = st.points[0]
+            # Baseline at pt; pad around glyph box for background
+            br = fm.boundingRect(text)
+            pad = max(3, int(st.width))
+            box = QRectF(
+                pt.x() - pad,
+                pt.y() - fm.ascent() - pad,
+                br.width() + pad * 2,
+                br.height() + pad * 2,
+            )
+            if st.bg_color is not None and st.bg_color.alpha() > 0:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor(st.bg_color)))
+                p.drawRoundedRect(box, 4, 4)
+            if st.outline:
+                # Dark outline then fill for readability on busy backgrounds
+                path = QPainterPath()
+                path.addText(pt, font, text)
+                outline = QPen(QColor(0, 0, 0, 230), max(2.0, st.width * 0.55))
+                outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                p.strokePath(path, outline)
+                p.fillPath(path, QBrush(col))
+            else:
+                p.setPen(col)
+                p.drawText(pt, text)
         elif st.kind == "number" and st.points:
             r = 12 + st.width
             c = st.points[0]
@@ -1070,6 +1150,7 @@ class ScreenshotEditor(QWidget):
                 padding: 6px 12px; font-weight: 800;
             }
             QPushButton#soft { background: #334155; }
+            QCheckBox { color: #e2e8f0; font-size: 12px; spacing: 6px; }
             """
         )
         lay = QVBoxLayout(panel)
@@ -1097,6 +1178,25 @@ class ScreenshotEditor(QWidget):
         edit.returnPressed.connect(self._commit_text_input)
         lay.addWidget(edit)
 
+        # Readability options: background + outline (persisted)
+        opt = QHBoxLayout()
+        chk_bg = QCheckBox("背景")
+        chk_bg.setChecked(bool(self.text_bg))
+        chk_bg.setToolTip("在文字后加色块，画面杂乱时更易读")
+        chk_bg.toggled.connect(self._on_text_bg_toggled)
+        btn_bg = QPushButton("背景色", objectName="soft")
+        btn_bg.setToolTip("选择文字背景颜色")
+        btn_bg.clicked.connect(self._pick_text_bg_color)
+        chk_ol = QCheckBox("描边")
+        chk_ol.setChecked(bool(self.text_outline))
+        chk_ol.setToolTip("文字外圈描边，提高对比度")
+        chk_ol.toggled.connect(self._on_text_outline_toggled)
+        opt.addWidget(chk_bg)
+        opt.addWidget(btn_bg)
+        opt.addWidget(chk_ol)
+        opt.addStretch(1)
+        lay.addLayout(opt)
+
         row = QHBoxLayout()
         btn_ok = QPushButton("确认")
         btn_ok.setToolTip("把文字画到截图上（不会退出截图）")
@@ -1109,8 +1209,8 @@ class ScreenshotEditor(QWidget):
         lay.addLayout(row)
 
         panel.adjustSize()
-        pw = max(panel.sizeHint().width(), 260)
-        ph = max(panel.sizeHint().height(), fs + 70)
+        pw = max(panel.sizeHint().width(), 300)
+        ph = max(panel.sizeHint().height(), fs + 110)
         panel.resize(pw, ph)
 
         s = self.sel.normalized()
@@ -1124,8 +1224,27 @@ class ScreenshotEditor(QWidget):
         self._text_panel = panel
         self._text_edit = edit
         self._set_action_shortcuts_enabled(False)
-        self._status_hint = "文字输入：Enter 或点「确认」写入 · Esc/取消 放弃 · 不会退出截图"
+        self._status_hint = "文字：背景/描边可开 · 粗细用工具栏或滚轮 · Enter 确认"
         self.update()
+
+    def _on_text_bg_toggled(self, on: bool) -> None:
+        self.text_bg = bool(on)
+        self._save_annot_prefs()
+
+    def _on_text_outline_toggled(self, on: bool) -> None:
+        self.text_outline = bool(on)
+        self._save_annot_prefs()
+
+    def _pick_text_bg_color(self) -> None:
+        c = QColorDialog.getColor(self.text_bg_color, self, "文字背景色")
+        if c.isValid():
+            # keep some opacity if user picks fully transparent/opaque pure color
+            if c.alpha() >= 255:
+                c.setAlpha(200)
+            self.text_bg_color = c
+            self.text_bg = True
+            self._save_annot_prefs()
+            self._status_hint = f"文字背景 {c.name()}（已记住）"
 
     def _destroy_text_ui(self) -> None:
         if self._text_panel is not None:
@@ -1152,6 +1271,8 @@ class ScreenshotEditor(QWidget):
                 color=QColor(self.color),
                 width=float(self.pen_w),
                 text=text,
+                bg_color=QColor(self.text_bg_color) if self.text_bg else None,
+                outline=bool(self.text_outline),
             )
             self.strokes.append(st)
             self.redo_stack.clear()
@@ -1228,14 +1349,14 @@ class ScreenshotEditor(QWidget):
             return
 
         if self.tool == "number":
+            num = self._next_number()
             st = Stroke(
                 kind="number",
                 points=[QPointF(pos)],
                 color=QColor(self.color),
                 width=float(self.pen_w),
-                number=self.number_seq,
+                number=num,
             )
-            self.number_seq += 1
             self.strokes.append(st)
             self.drawing = False
             self._status_hint = f"已添加序号 {st.number} · 共 {len(self.strokes)} 笔"
@@ -1441,13 +1562,16 @@ class ScreenshotEditor(QWidget):
         if act == "undo":
             if self.strokes:
                 self.redo_stack.append(self.strokes.pop())
-                self._status_hint = f"已撤销 · 剩余 {len(self.strokes)} 笔，可继续标注"
+                # Keep number stamps consecutive: next id = max remaining + 1
+                nxt = self._next_number()
+                self._status_hint = f"已撤销 · 剩余 {len(self.strokes)} 笔 · 下一序号 {nxt}"
                 self.update()
             return
         if act == "redo":
             if self.redo_stack:
                 self.strokes.append(self.redo_stack.pop())
-                self._status_hint = f"已重做 · 共 {len(self.strokes)} 笔"
+                nxt = self._next_number()
+                self._status_hint = f"已重做 · 共 {len(self.strokes)} 笔 · 下一序号 {nxt}"
                 self.update()
             return
         img = self.export_image()
