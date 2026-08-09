@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Bump when shipping a new installer.
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 # Public releases channel (organization repo — no personal account)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"

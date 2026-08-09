@@ -120,7 +120,8 @@ class Stroke:
     number: int = 0
     # text extras: readable labels on busy screenshots
     bg_color: QColor | None = None  # None = no background fill
-    outline: bool = False  # dark outline around glyphs
+    outline: bool = False
+    outline_color: QColor | None = None  # stroke/outline around text
     # for pixelate/blur: store processed pixmap of the rect region after apply
     baked: QImage | None = None
 
@@ -272,8 +273,9 @@ class ScreenshotEditor(QWidget):
         self.color = QColor("#ff0000")
         self.pen_w = 6  # brush thickness (not QWidget.width)
         self.text_bg = True
-        self.text_bg_color = QColor(0, 0, 0, 200)
+        self.text_bg_color = QColor(0, 0, 0, 210)
         self.text_outline = True
+        self.text_outline_color = QColor(0, 0, 0, 255)
         self._load_annot_prefs()
         self.drawing = False
         self.cur_stroke: Stroke | None = None
@@ -402,35 +404,81 @@ class ScreenshotEditor(QWidget):
         self.activateWindow()
         self.setFocus(Qt.FocusReason.MouseFocusReason)
 
+    @staticmethod
+    def _color_to_rgba(c: QColor) -> list[int]:
+        return [int(c.red()), int(c.green()), int(c.blue()), int(c.alpha())]
+
+    @staticmethod
+    def _color_from_cfg(val, default: QColor) -> QColor:
+        """Load color from list [r,g,b,a] or hex string."""
+        try:
+            if isinstance(val, (list, tuple)) and len(val) >= 3:
+                a = int(val[3]) if len(val) > 3 else 255
+                c = QColor(int(val[0]), int(val[1]), int(val[2]), a)
+                return c if c.isValid() else QColor(default)
+            if isinstance(val, str) and val.strip():
+                c = QColor(val.strip())
+                return c if c.isValid() else QColor(default)
+        except Exception:
+            pass
+        return QColor(default)
+
+    def _pick_color_dialog(self, initial: QColor, title: str, *, alpha: bool = False) -> QColor | None:
+        """Color picker that stays above the fullscreen Tool overlay.
+
+        Parent is None so the dialog is a normal top-level window (not buried
+        under the screenshot Tool surface).
+        """
+        opts = QColorDialog.ColorDialogOption(0)
+        if alpha:
+            opts |= QColorDialog.ColorDialogOption.ShowAlphaChannel
+        # Temporarily drop stay-on-top so the dialog is usable
+        old_flags = self.windowFlags()
+        try:
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+            self.show()
+            c = QColorDialog.getColor(initial, None, title, opts)
+        finally:
+            try:
+                self.setWindowFlags(old_flags)
+                self.show()
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+        return c if c.isValid() else None
+
     def _load_annot_prefs(self) -> None:
         """Restore pen color/width + text label style from screenshot cfg."""
         cfg = self.cfg if isinstance(self.cfg, dict) else {}
-        c = QColor(str(cfg.get("annot_color") or "#ff0000"))
-        self.color = c if c.isValid() else QColor("#ff0000")
+        self.color = self._color_from_cfg(cfg.get("annot_color"), QColor("#ff0000"))
         try:
             self.pen_w = max(1, min(40, int(cfg.get("annot_width") or 6)))
         except (TypeError, ValueError):
             self.pen_w = 6
         self.text_bg = bool(cfg.get("annot_text_bg", True))
-        bg = QColor(str(cfg.get("annot_text_bg_color") or "#000000c8"))
-        self.text_bg_color = bg if bg.isValid() else QColor(0, 0, 0, 200)
+        self.text_bg_color = self._color_from_cfg(
+            cfg.get("annot_text_bg_rgba") or cfg.get("annot_text_bg_color"),
+            QColor(0, 0, 0, 210),
+        )
+        if self.text_bg_color.alpha() < 40:
+            self.text_bg_color.setAlpha(210)
         self.text_outline = bool(cfg.get("annot_text_outline", True))
+        self.text_outline_color = self._color_from_cfg(
+            cfg.get("annot_text_outline_rgba") or cfg.get("annot_text_outline_color"),
+            QColor(0, 0, 0, 255),
+        )
 
     def _save_annot_prefs(self) -> None:
         """Persist preferences so next capture keeps color/width/text style."""
         if not isinstance(self.cfg, dict):
             return
-        try:
-            self.cfg["annot_color"] = self.color.name(QColor.NameFormat.HexRgb)
-        except Exception:
-            self.cfg["annot_color"] = self.color.name()
+        self.cfg["annot_color"] = self._color_to_rgba(self.color)
         self.cfg["annot_width"] = int(self.pen_w)
         self.cfg["annot_text_bg"] = bool(self.text_bg)
-        try:
-            self.cfg["annot_text_bg_color"] = self.text_bg_color.name(QColor.NameFormat.HexArgb)
-        except Exception:
-            self.cfg["annot_text_bg_color"] = "#000000c8"
+        self.cfg["annot_text_bg_rgba"] = self._color_to_rgba(self.text_bg_color)
         self.cfg["annot_text_outline"] = bool(self.text_outline)
+        self.cfg["annot_text_outline_rgba"] = self._color_to_rgba(self.text_outline_color)
 
     def _set_color(self, c: QColor) -> None:
         self.color = QColor(c)
@@ -1000,38 +1048,7 @@ class ScreenshotEditor(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(r)
         elif st.kind == "text" and st.points:
-            text = st.text or ""
-            if not text:
-                return
-            fs = max(10, int(st.width * 3))
-            font = QFont("Segoe UI", fs, QFont.Weight.Bold)
-            p.setFont(font)
-            fm = p.fontMetrics()
-            pt = st.points[0]
-            # Baseline at pt; pad around glyph box for background
-            br = fm.boundingRect(text)
-            pad = max(3, int(st.width))
-            box = QRectF(
-                pt.x() - pad,
-                pt.y() - fm.ascent() - pad,
-                br.width() + pad * 2,
-                br.height() + pad * 2,
-            )
-            if st.bg_color is not None and st.bg_color.alpha() > 0:
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(QColor(st.bg_color)))
-                p.drawRoundedRect(box, 4, 4)
-            if st.outline:
-                # Dark outline then fill for readability on busy backgrounds
-                path = QPainterPath()
-                path.addText(pt, font, text)
-                outline = QPen(QColor(0, 0, 0, 230), max(2.0, st.width * 0.55))
-                outline.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                p.strokePath(path, outline)
-                p.fillPath(path, QBrush(col))
-            else:
-                p.setPen(col)
-                p.drawText(pt, text)
+            self._paint_text_label(p, st, col)
         elif st.kind == "number" and st.points:
             r = 12 + st.width
             c = st.points[0]
@@ -1046,6 +1063,60 @@ class ScreenshotEditor(QWidget):
             p.setPen(QPen(col, 1, Qt.PenStyle.DashLine))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(r)
+
+    def _paint_text_label(self, p: QPainter, st: Stroke, col: QColor) -> None:
+        """Draw text with optional solid background + outline (readable on clutter)."""
+        text = st.text or ""
+        if not text:
+            return
+        fs = max(12, int(st.width * 3.2))
+        font = QFont("Microsoft YaHei UI", fs, QFont.Weight.Bold)
+        if not font.exactMatch():
+            font = QFont("Segoe UI", fs, QFont.Weight.Bold)
+        p.setFont(font)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        fm = p.fontMetrics()
+        pt = st.points[0]
+        # Use tight metrics relative to baseline at pt
+        br = fm.boundingRect(text)
+        pad_x = max(6, int(st.width * 1.2))
+        pad_y = max(4, int(st.width))
+        box = QRectF(
+            pt.x() + br.x() - pad_x,
+            pt.y() + br.y() - pad_y,
+            max(br.width(), 1) + pad_x * 2,
+            max(br.height(), 1) + pad_y * 2,
+        )
+        # Background plate
+        if st.bg_color is not None:
+            bg = QColor(st.bg_color)
+            if bg.alpha() < 30:
+                bg.setAlpha(210)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(bg))
+            p.drawRoundedRect(box, 5, 5)
+        # Outline then fill (works better for CJK than strokePath alone on some fonts)
+        if st.outline:
+            oc = QColor(st.outline_color) if st.outline_color is not None else QColor(0, 0, 0)
+            if oc.alpha() < 30:
+                oc.setAlpha(255)
+            ow = max(2.0, float(st.width) * 0.65)
+            # 8-direction offset outline
+            p.setPen(oc)
+            for dx, dy in (
+                (-ow, 0),
+                (ow, 0),
+                (0, -ow),
+                (0, ow),
+                (-ow, -ow),
+                (ow, -ow),
+                (-ow, ow),
+                (ow, ow),
+            ):
+                p.drawText(QPointF(pt.x() + dx, pt.y() + dy), text)
+        p.setPen(col)
+        p.drawText(pt, text)
 
     def _draw_arrow_head(self, p: QPainter, a: QPointF, b: QPointF, col: QColor, w: float) -> None:
         ang = math.atan2(b.y() - a.y(), b.x() - a.x())
@@ -1123,15 +1194,45 @@ class ScreenshotEditor(QWidget):
             self._rebuild_dock()
             return True
         if kind == "color_more":
-            c = QColorDialog.getColor(self.color, self, "选择颜色")
-            if c.isValid():
+            c = self._pick_color_dialog(self.color, "选择画笔/文字颜色", alpha=False)
+            if c is not None:
                 self._set_color(c)
                 self._rebuild_dock()
             return True
         return False
 
+    def _swatch_style(self, c: QColor) -> str:
+        return (
+            f"background: {c.name()}; border: 1px solid #94a3b8; border-radius: 4px; "
+            f"min-width: 22px; max-width: 22px; min-height: 22px; max-height: 22px;"
+        )
+
+    def _refresh_text_swatches(self) -> None:
+        if getattr(self, "_sw_font", None) is not None:
+            self._sw_font.setStyleSheet(self._swatch_style(self.color))
+        if getattr(self, "_sw_bg", None) is not None:
+            self._sw_bg.setStyleSheet(self._swatch_style(self.text_bg_color))
+        if getattr(self, "_sw_ol", None) is not None:
+            self._sw_ol.setStyleSheet(self._swatch_style(self.text_outline_color))
+        if getattr(self, "_text_edit", None) is not None and self._text_edit is not None:
+            fs = max(14, int(self.pen_w * 3))
+            self._text_edit.setStyleSheet(
+                f"""
+                QLineEdit {{
+                    background: #020617;
+                    color: {self.color.name()};
+                    border: 1px solid #38bdf8;
+                    border-radius: 6px;
+                    padding: 6px 8px;
+                    font-size: {fs}px;
+                    font-weight: 700;
+                    selection-background-color: #0ea5e9;
+                }}
+                """
+            )
+
     def _begin_text_input(self, pos: QPoint) -> None:
-        """Visible in-place text field + 确认/取消 (Enter only commits text, not exit)."""
+        """Visible in-place text field with real color controls (font / bg / outline)."""
         self._cancel_text_input()
         self._text_anchor = QPoint(pos)
         fs = max(14, int(self.pen_w * 3))
@@ -1141,61 +1242,79 @@ class ScreenshotEditor(QWidget):
         panel.setStyleSheet(
             """
             QWidget#textPanel {
-                background: rgba(15, 23, 42, 0.96);
+                background: rgba(15, 23, 42, 0.98);
                 border: 2px solid #38bdf8;
                 border-radius: 10px;
             }
             QPushButton {
                 background: #0ea5e9; color: white; border: none; border-radius: 6px;
-                padding: 6px 12px; font-weight: 800;
+                padding: 6px 10px; font-weight: 800; font-size: 12px;
             }
-            QPushButton#soft { background: #334155; }
+            QPushButton#soft { background: #334155; color: #f1f5f9; }
             QCheckBox { color: #e2e8f0; font-size: 12px; spacing: 6px; }
+            QLabel#hint { color: #94a3b8; font-size: 11px; }
             """
         )
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
 
         edit = QLineEdit(panel)
-        edit.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background: #020617;
-                color: {self.color.name()};
-                border: 1px solid #38bdf8;
-                border-radius: 6px;
-                padding: 6px 8px;
-                font-size: {fs}px;
-                font-weight: 700;
-                selection-background-color: #0ea5e9;
-            }}
-            """
-        )
         edit.setPlaceholderText("在此输入文字…")
-        edit.setMinimumWidth(200)
-        # returnPressed only commits text (shortcut handler also checks text mode)
+        edit.setMinimumWidth(260)
         edit.returnPressed.connect(self._commit_text_input)
         lay.addWidget(edit)
 
-        # Readability options: background + outline (persisted)
-        opt = QHBoxLayout()
-        chk_bg = QCheckBox("背景")
+        # Row: font color
+        r1 = QHBoxLayout()
+        r1.addWidget(QLabel("字体颜色", objectName="hint"))
+        self._sw_font = QLabel()
+        self._sw_font.setFixedSize(22, 22)
+        btn_font = QPushButton("选颜色", objectName="soft")
+        btn_font.setToolTip("文字本身的颜色（也可用下方色板）")
+        btn_font.clicked.connect(self._pick_text_font_color)
+        r1.addWidget(self._sw_font)
+        r1.addWidget(btn_font)
+        r1.addStretch(1)
+        lay.addLayout(r1)
+
+        # Row: background
+        r2 = QHBoxLayout()
+        chk_bg = QCheckBox("启用背景")
         chk_bg.setChecked(bool(self.text_bg))
-        chk_bg.setToolTip("在文字后加色块，画面杂乱时更易读")
+        chk_bg.setToolTip("文字后面加色块，杂乱截图上也看得清")
         chk_bg.toggled.connect(self._on_text_bg_toggled)
+        self._sw_bg = QLabel()
+        self._sw_bg.setFixedSize(22, 22)
         btn_bg = QPushButton("背景色", objectName="soft")
-        btn_bg.setToolTip("选择文字背景颜色")
+        btn_bg.setToolTip("选择背景色（支持透明度）")
         btn_bg.clicked.connect(self._pick_text_bg_color)
-        chk_ol = QCheckBox("描边")
+        r2.addWidget(chk_bg)
+        r2.addWidget(self._sw_bg)
+        r2.addWidget(btn_bg)
+        r2.addStretch(1)
+        lay.addLayout(r2)
+
+        # Row: outline
+        r3 = QHBoxLayout()
+        chk_ol = QCheckBox("启用描边")
         chk_ol.setChecked(bool(self.text_outline))
-        chk_ol.setToolTip("文字外圈描边，提高对比度")
+        chk_ol.setToolTip("文字周围描边，提高对比度")
         chk_ol.toggled.connect(self._on_text_outline_toggled)
-        opt.addWidget(chk_bg)
-        opt.addWidget(btn_bg)
-        opt.addWidget(chk_ol)
-        opt.addStretch(1)
-        lay.addLayout(opt)
+        self._sw_ol = QLabel()
+        self._sw_ol.setFixedSize(22, 22)
+        btn_ol = QPushButton("描边色", objectName="soft")
+        btn_ol.setToolTip("选择描边颜色")
+        btn_ol.clicked.connect(self._pick_text_outline_color)
+        r3.addWidget(chk_ol)
+        r3.addWidget(self._sw_ol)
+        r3.addWidget(btn_ol)
+        r3.addStretch(1)
+        lay.addLayout(r3)
+
+        tip = QLabel("字号=工具栏粗细（滚轮可调）· 改色后点确认写入截图", objectName="hint")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
 
         row = QHBoxLayout()
         btn_ok = QPushButton("确认")
@@ -1208,9 +1327,15 @@ class ScreenshotEditor(QWidget):
         row.addStretch(1)
         lay.addLayout(row)
 
+        self._text_panel = panel
+        self._text_edit = edit
+        self._chk_text_bg = chk_bg
+        self._chk_text_ol = chk_ol
+        self._refresh_text_swatches()
+
         panel.adjustSize()
-        pw = max(panel.sizeHint().width(), 300)
-        ph = max(panel.sizeHint().height(), fs + 110)
+        pw = max(panel.sizeHint().width(), 340)
+        ph = max(panel.sizeHint().height(), 200)
         panel.resize(pw, ph)
 
         s = self.sel.normalized()
@@ -1221,30 +1346,54 @@ class ScreenshotEditor(QWidget):
         panel.raise_()
         edit.setFocus(Qt.FocusReason.OtherFocusReason)
 
-        self._text_panel = panel
-        self._text_edit = edit
         self._set_action_shortcuts_enabled(False)
-        self._status_hint = "文字：背景/描边可开 · 粗细用工具栏或滚轮 · Enter 确认"
+        self._status_hint = "文字：可设字体色/背景色/描边色 · 确认后画到图上"
         self.update()
 
     def _on_text_bg_toggled(self, on: bool) -> None:
         self.text_bg = bool(on)
         self._save_annot_prefs()
+        self._status_hint = "文字背景：开" if on else "文字背景：关"
 
     def _on_text_outline_toggled(self, on: bool) -> None:
         self.text_outline = bool(on)
         self._save_annot_prefs()
+        self._status_hint = "文字描边：开" if on else "文字描边：关"
+
+    def _pick_text_font_color(self) -> None:
+        c = self._pick_color_dialog(self.color, "文字颜色", alpha=False)
+        if c is not None:
+            self._set_color(c)
+            self._refresh_text_swatches()
+            self._status_hint = f"字体颜色 {c.name()}（已记住）"
 
     def _pick_text_bg_color(self) -> None:
-        c = QColorDialog.getColor(self.text_bg_color, self, "文字背景色")
-        if c.isValid():
-            # keep some opacity if user picks fully transparent/opaque pure color
-            if c.alpha() >= 255:
-                c.setAlpha(200)
+        c = self._pick_color_dialog(self.text_bg_color, "文字背景色", alpha=True)
+        if c is not None:
+            if c.alpha() < 40:
+                c.setAlpha(210)
             self.text_bg_color = c
             self.text_bg = True
+            if getattr(self, "_chk_text_bg", None) is not None:
+                self._chk_text_bg.blockSignals(True)
+                self._chk_text_bg.setChecked(True)
+                self._chk_text_bg.blockSignals(False)
             self._save_annot_prefs()
-            self._status_hint = f"文字背景 {c.name()}（已记住）"
+            self._refresh_text_swatches()
+            self._status_hint = f"背景色已设置（透明度 {c.alpha()}）"
+
+    def _pick_text_outline_color(self) -> None:
+        c = self._pick_color_dialog(self.text_outline_color, "文字描边色", alpha=False)
+        if c is not None:
+            self.text_outline_color = c
+            self.text_outline = True
+            if getattr(self, "_chk_text_ol", None) is not None:
+                self._chk_text_ol.blockSignals(True)
+                self._chk_text_ol.setChecked(True)
+                self._chk_text_ol.blockSignals(False)
+            self._save_annot_prefs()
+            self._refresh_text_swatches()
+            self._status_hint = f"描边色 {c.name()}（已记住）"
 
     def _destroy_text_ui(self) -> None:
         if self._text_panel is not None:
@@ -1255,6 +1404,11 @@ class ScreenshotEditor(QWidget):
             self._text_edit.hide()
             self._text_edit.deleteLater()
         self._text_edit = None
+        self._sw_font = None
+        self._sw_bg = None
+        self._sw_ol = None
+        self._chk_text_bg = None
+        self._chk_text_ol = None
         self._set_action_shortcuts_enabled(True)
 
     def _commit_text_input(self) -> None:
@@ -1265,18 +1419,29 @@ class ScreenshotEditor(QWidget):
         pos = QPoint(self._text_anchor)
         self._destroy_text_ui()
         if text:
+            bg = QColor(self.text_bg_color) if self.text_bg else None
+            if bg is not None and bg.alpha() < 40:
+                bg.setAlpha(210)
+            ol_c = QColor(self.text_outline_color) if self.text_outline else None
             st = Stroke(
                 kind="text",
                 points=[QPointF(pos)],
                 color=QColor(self.color),
                 width=float(self.pen_w),
                 text=text,
-                bg_color=QColor(self.text_bg_color) if self.text_bg else None,
+                bg_color=bg,
                 outline=bool(self.text_outline),
+                outline_color=ol_c,
             )
             self.strokes.append(st)
             self.redo_stack.clear()
-            self._status_hint = f"已添加文字「{text[:20]}」· 共 {len(self.strokes)} 笔 · 可继续标注"
+            flags = []
+            if bg is not None:
+                flags.append("背景")
+            if self.text_outline:
+                flags.append("描边")
+            extra = ("+" + "+".join(flags)) if flags else "无底"
+            self._status_hint = f"已添加文字「{text[:20]}」({extra}) · 共 {len(self.strokes)} 笔"
         else:
             self._status_hint = "未输入文字（已取消）"
         self.setFocus()
