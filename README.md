@@ -2,7 +2,7 @@
 
 桌面效率工具箱：截图、录屏、文件传输、系统清理、音乐、待办、便签、番茄钟、闹钟。
 
-版本：**1.1.0**（Windows 安装包 + macOS 源码 / `build_mac.sh` 打 .app）
+版本：**1.1.2**（Windows 安装包 + macOS 源码 / `build_mac.sh` 打 .app）
 
 ## 功能
 
