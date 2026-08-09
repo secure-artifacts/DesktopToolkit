@@ -299,6 +299,7 @@ class ScreenshotEditor(QWidget):
         self._text_edit: QLineEdit | None = None
         self._text_panel: QWidget | None = None
         self._text_anchor = QPoint()
+        self._text_preview: str = ""  # live WYSIWYG draft while typing
 
         self._pinned: list[PinnedShot] = []
         self._action_shortcuts: list[QShortcut] = []
@@ -485,6 +486,8 @@ class ScreenshotEditor(QWidget):
         self.color = QColor(c)
         self._save_annot_prefs()
         self._status_hint = f"颜色 {self.color.name()}（已记住）"
+        if self._text_input_active():
+            self._refresh_text_swatches()
         self.update()
 
     def _set_width(self, w: int) -> None:
@@ -501,6 +504,9 @@ class ScreenshotEditor(QWidget):
                 self._rebuild_dock()
             except Exception:
                 pass
+        if self._text_input_active():
+            self._refresh_text_swatches()
+            self._status_hint = f"字号(粗细) {self.pen_w} · 实时预览中"
         self.update()
 
     def _next_number(self) -> int:
@@ -563,8 +569,6 @@ class ScreenshotEditor(QWidget):
             return False
         if self.phase != "edit":
             return False
-        if self._text_input_active():
-            return False
         try:
             gp = QCursor.pos()
             if not self.frameGeometry().contains(gp):
@@ -575,14 +579,8 @@ class ScreenshotEditor(QWidget):
         return True
 
     def wheelEvent(self, e: QWheelEvent) -> None:  # type: ignore[override]
-        """Mouse wheel adjusts brush thickness (edit mode)."""
+        """Mouse wheel adjusts brush thickness (edit mode; also live text size)."""
         if self.phase != "edit":
-            try:
-                super().wheelEvent(e)
-            except Exception:
-                pass
-            return
-        if self._text_input_active():
             try:
                 super().wheelEvent(e)
             except Exception:
@@ -991,12 +989,14 @@ class ScreenshotEditor(QWidget):
                 self._paint_stroke(p, st)
             if self.cur_stroke:
                 self._paint_stroke(p, self.cur_stroke)
+            self._paint_text_live_preview(p)
             p.restore()
         else:
             for st in self.strokes:
                 self._paint_stroke(p, st)
             if self.cur_stroke:
                 self._paint_stroke(p, self.cur_stroke)
+            self._paint_text_live_preview(p)
 
         # Flameshot-style tools painted around selection (always on top of dim)
         self._paint_dock(p)
@@ -1065,45 +1065,51 @@ class ScreenshotEditor(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(r)
 
+    def _text_font_for_width(self, width: float) -> QFont:
+        fs = max(12, int(float(width) * 3.2))
+        font = QFont("Microsoft YaHei UI", fs, QFont.Weight.Bold)
+        if not font.exactMatch():
+            font = QFont("Segoe UI", fs, QFont.Weight.Bold)
+        return font
+
     def _paint_text_label(self, p: QPainter, st: Stroke, col: QColor) -> None:
         """Draw text with optional solid background + outline (readable on clutter)."""
         text = st.text or ""
         if not text:
             return
-        fs = max(12, int(st.width * 3.2))
-        font = QFont("Microsoft YaHei UI", fs, QFont.Weight.Bold)
-        if not font.exactMatch():
-            font = QFont("Segoe UI", fs, QFont.Weight.Bold)
+        font = self._text_font_for_width(st.width)
         p.setFont(font)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         fm = p.fontMetrics()
         pt = st.points[0]
-        # Use tight metrics relative to baseline at pt
-        br = fm.boundingRect(text)
-        pad_x = max(6, int(st.width * 1.2))
-        pad_y = max(4, int(st.width))
+        # Baseline at pt; box from advance + ascent/descent (stable for CJK)
+        adv = max(1, fm.horizontalAdvance(text))
+        ascent = fm.ascent()
+        descent = fm.descent()
+        pad_x = max(4, int(st.width * 0.55))
+        pad_y = max(3, int(st.width * 0.45))
         box = QRectF(
-            pt.x() + br.x() - pad_x,
-            pt.y() + br.y() - pad_y,
-            max(br.width(), 1) + pad_x * 2,
-            max(br.height(), 1) + pad_y * 2,
+            pt.x() - pad_x,
+            pt.y() - ascent - pad_y,
+            adv + pad_x * 2,
+            ascent + descent + pad_y * 2,
         )
         # Background plate
         if st.bg_color is not None:
             bg = QColor(st.bg_color)
             if bg.alpha() < 30:
-                bg.setAlpha(210)
+                bg.setAlpha(200)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(bg))
-            p.drawRoundedRect(box, 5, 5)
+            p.drawRoundedRect(box, 4, 4)
         # Outline then fill (works better for CJK than strokePath alone on some fonts)
         if st.outline:
             oc = QColor(st.outline_color) if st.outline_color is not None else QColor(0, 0, 0)
             if oc.alpha() < 30:
                 oc.setAlpha(255)
-            ow = max(2.0, float(st.width) * 0.65)
-            # 8-direction offset outline
+            # Cap outline so thick brush doesn't explode into a huge black blob
+            ow = max(1.2, min(3.5, float(st.width) * 0.35))
             p.setPen(oc)
             for dx, dy in (
                 (-ow, 0),
@@ -1118,6 +1124,69 @@ class ScreenshotEditor(QWidget):
                 p.drawText(QPointF(pt.x() + dx, pt.y() + dy), text)
         p.setPen(col)
         p.drawText(pt, text)
+
+    def _make_text_preview_stroke(self) -> Stroke | None:
+        """Current typing draft as a stroke (same paint path as final)."""
+        if not self._text_input_active():
+            return None
+        text = self._text_preview
+        if self._text_edit is not None:
+            text = self._text_edit.text()
+        text = text if text is not None else ""
+        # Keep spaces while typing; strip only on commit
+        if not text:
+            return None
+        bg = QColor(self.text_bg_color) if self.text_bg else None
+        if bg is not None and bg.alpha() < 40:
+            bg.setAlpha(200)
+        ol_c = QColor(self.text_outline_color) if self.text_outline else None
+        return Stroke(
+            kind="text",
+            points=[QPointF(self._text_anchor)],
+            color=QColor(self.color),
+            width=float(self.pen_w),
+            text=text,
+            bg_color=bg,
+            outline=bool(self.text_outline),
+            outline_color=ol_c,
+        )
+
+    def _paint_text_live_preview(self, p: QPainter) -> None:
+        """WYSIWYG preview at click anchor while the text panel is open."""
+        if not self._text_input_active():
+            return
+        st = self._make_text_preview_stroke()
+        if st is not None:
+            self._paint_text_label(p, st, QColor(st.color))
+            # Soft dashed ring so user sees this is draft, not committed
+            try:
+                font = self._text_font_for_width(st.width)
+                p.setFont(font)
+                fm = p.fontMetrics()
+                adv = max(1, fm.horizontalAdvance(st.text or ""))
+                ascent = fm.ascent()
+                descent = fm.descent()
+                pad = 6
+                box = QRectF(
+                    self._text_anchor.x() - pad,
+                    self._text_anchor.y() - ascent - pad,
+                    adv + pad * 2,
+                    ascent + descent + pad * 2,
+                )
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor(56, 189, 248, 180), 1, Qt.PenStyle.DashLine))
+                p.drawRoundedRect(box.adjusted(-3, -3, 3, 3), 5, 5)
+            except Exception:
+                pass
+            return
+        # Empty: show insertion caret + hint at anchor
+        ax, ay = self._text_anchor.x(), self._text_anchor.y()
+        fs = max(12, int(self.pen_w * 3.2))
+        p.setPen(QPen(QColor(56, 189, 248), 2))
+        p.drawLine(ax, ay - fs, ax, ay + 4)
+        p.setPen(QColor(148, 163, 184))
+        p.setFont(QFont("Microsoft YaHei UI", 11))
+        p.drawText(ax + 6, ay, "在此输入…（实时预览）")
 
     def _draw_arrow_head(self, p: QPainter, a: QPointF, b: QPointF, col: QColor, w: float) -> None:
         ang = math.atan2(b.y() - a.y(), b.x() - a.x())
@@ -1232,11 +1301,51 @@ class ScreenshotEditor(QWidget):
                 """
             )
 
+    def _place_text_panel(self, panel: QWidget, anchor: QPoint, pw: int, ph: int) -> None:
+        """Put control panel near selection but not covering the live text preview."""
+        s = self.sel.normalized()
+        if s.isNull() or s.width() < 4:
+            s = self.rect()
+        gap = 16
+        candidates = [
+            # Prefer under / right of click so WYSIWYG at anchor stays visible
+            QPoint(anchor.x(), anchor.y() + gap + 8),
+            QPoint(anchor.x() - pw // 2, anchor.y() + gap + 8),
+            QPoint(anchor.x(), anchor.y() - ph - gap),
+            QPoint(s.left() + 8, s.bottom() - ph - 8),
+            QPoint(s.right() - pw - 8, s.bottom() - ph - 8),
+            QPoint(s.left() + 8, s.top() + 8),
+            QPoint(s.right() - pw - 8, s.top() + 8),
+        ]
+        chosen = None
+        for c in candidates:
+            x = max(s.left() + 2, min(c.x(), max(s.left() + 2, s.right() - pw - 2)))
+            y = max(s.top() + 2, min(c.y(), max(s.top() + 2, s.bottom() - ph - 2)))
+            rect = QRect(x, y, pw, ph)
+            # Keep a margin around anchor so preview isn't hidden under the panel
+            if rect.adjusted(-8, -8, 8, 8).contains(anchor):
+                continue
+            chosen = QPoint(x, y)
+            break
+        if chosen is None:
+            x = max(s.left() + 2, min(anchor.x(), max(s.left() + 2, s.right() - pw - 2)))
+            y = max(s.top() + 2, min(anchor.y() + gap + 8, max(s.top() + 2, s.bottom() - ph - 2)))
+            chosen = QPoint(x, y)
+        panel.move(chosen)
+
+    def _on_text_preview_changed(self, text: str = "") -> None:
+        """Refresh canvas WYSIWYG as user types or toggles style."""
+        if self._text_edit is not None:
+            self._text_preview = self._text_edit.text()
+        else:
+            self._text_preview = text or ""
+        self.update()
+
     def _begin_text_input(self, pos: QPoint) -> None:
         """Visible in-place text field with real color controls (font / bg / outline)."""
         self._cancel_text_input()
         self._text_anchor = QPoint(pos)
-        fs = max(14, int(self.pen_w * 3))
+        self._text_preview = ""
 
         panel = QWidget(self)
         panel.setObjectName("textPanel")
@@ -1261,11 +1370,12 @@ class ScreenshotEditor(QWidget):
         lay.setSpacing(8)
 
         edit = QLineEdit(panel)
-        edit.setPlaceholderText("在此输入文字…")
+        edit.setPlaceholderText("在此输入文字…（选区上会实时预览）")
         edit.setMinimumWidth(260)
         edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         edit.setClearButtonEnabled(True)
         edit.returnPressed.connect(self._commit_text_input)
+        edit.textChanged.connect(self._on_text_preview_changed)
         lay.addWidget(edit)
 
         # Row: font color
@@ -1315,7 +1425,7 @@ class ScreenshotEditor(QWidget):
         r3.addStretch(1)
         lay.addLayout(r3)
 
-        tip = QLabel("字号=工具栏粗细（滚轮可调）· 改色后点确认写入截图", objectName="hint")
+        tip = QLabel("点击处实时预览最终效果 · 字号=粗细 · 确认写入", objectName="hint")
         tip.setWordWrap(True)
         lay.addWidget(tip)
 
@@ -1340,11 +1450,7 @@ class ScreenshotEditor(QWidget):
         pw = max(panel.sizeHint().width(), 340)
         ph = max(panel.sizeHint().height(), 200)
         panel.resize(pw, ph)
-
-        s = self.sel.normalized()
-        x = max(s.left() + 2, min(pos.x(), s.right() - pw - 2))
-        y = max(s.top() + 2, min(pos.y(), s.bottom() - ph - 2))
-        panel.move(x, y)
+        self._place_text_panel(panel, pos, pw, ph)
         panel.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         panel.show()
         panel.raise_()
@@ -1356,7 +1462,7 @@ class ScreenshotEditor(QWidget):
         QTimer.singleShot(0, lambda e=edit: self._focus_text_edit(e))
         QTimer.singleShot(50, lambda e=edit: self._focus_text_edit(e))
 
-        self._status_hint = "文字：可设字体色/背景色/描边色 · 确认后画到图上"
+        self._status_hint = "文字实时预览中 · 改字/改色立刻看到 · 确认写入"
         self.update()
 
     def _focus_text_edit(self, edit: QLineEdit | None) -> None:
@@ -1376,11 +1482,13 @@ class ScreenshotEditor(QWidget):
         self.text_bg = bool(on)
         self._save_annot_prefs()
         self._status_hint = "文字背景：开" if on else "文字背景：关"
+        self._on_text_preview_changed()
 
     def _on_text_outline_toggled(self, on: bool) -> None:
         self.text_outline = bool(on)
         self._save_annot_prefs()
         self._status_hint = "文字描边：开" if on else "文字描边：关"
+        self._on_text_preview_changed()
 
     def _pick_text_font_color(self) -> None:
         c = self._pick_color_dialog(self.color, "文字颜色", alpha=False)
@@ -1388,6 +1496,7 @@ class ScreenshotEditor(QWidget):
             self._set_color(c)
             self._refresh_text_swatches()
             self._status_hint = f"字体颜色 {c.name()}（已记住）"
+            self._on_text_preview_changed()
         QTimer.singleShot(0, lambda: self._focus_text_edit(self._text_edit))
 
     def _pick_text_bg_color(self) -> None:
@@ -1404,6 +1513,7 @@ class ScreenshotEditor(QWidget):
             self._save_annot_prefs()
             self._refresh_text_swatches()
             self._status_hint = f"背景色已设置（透明度 {c.alpha()}）"
+            self._on_text_preview_changed()
         QTimer.singleShot(0, lambda: self._focus_text_edit(self._text_edit))
 
     def _pick_text_outline_color(self) -> None:
@@ -1418,6 +1528,7 @@ class ScreenshotEditor(QWidget):
             self._save_annot_prefs()
             self._refresh_text_swatches()
             self._status_hint = f"描边色 {c.name()}（已记住）"
+            self._on_text_preview_changed()
         QTimer.singleShot(0, lambda: self._focus_text_edit(self._text_edit))
 
     def _destroy_text_ui(self) -> None:
@@ -1429,6 +1540,7 @@ class ScreenshotEditor(QWidget):
             self._text_edit.hide()
             self._text_edit.deleteLater()
         self._text_edit = None
+        self._text_preview = ""
         self._sw_font = None
         self._sw_bg = None
         self._sw_ol = None
