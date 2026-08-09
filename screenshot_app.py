@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QColorDialog,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -1262,6 +1263,8 @@ class ScreenshotEditor(QWidget):
         edit = QLineEdit(panel)
         edit.setPlaceholderText("在此输入文字…")
         edit.setMinimumWidth(260)
+        edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        edit.setClearButtonEnabled(True)
         edit.returnPressed.connect(self._commit_text_input)
         lay.addWidget(edit)
 
@@ -1342,13 +1345,32 @@ class ScreenshotEditor(QWidget):
         x = max(s.left() + 2, min(pos.x(), s.right() - pw - 2))
         y = max(s.top() + 2, min(pos.y(), s.bottom() - ph - 2))
         panel.move(x, y)
+        panel.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         panel.show()
         panel.raise_()
-        edit.setFocus(Qt.FocusReason.OtherFocusReason)
-
+        # Tool overlay often keeps focus on the host — force line edit to receive keys/IME
         self._set_action_shortcuts_enabled(False)
+        self.activateWindow()
+        panel.activateWindow()
+        edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        QTimer.singleShot(0, lambda e=edit: self._focus_text_edit(e))
+        QTimer.singleShot(50, lambda e=edit: self._focus_text_edit(e))
+
         self._status_hint = "文字：可设字体色/背景色/描边色 · 确认后画到图上"
         self.update()
+
+    def _focus_text_edit(self, edit: QLineEdit | None) -> None:
+        """Re-focus the text field after panel/color UI settles (Tool window focus quirks)."""
+        if edit is None or self._text_edit is not edit:
+            return
+        try:
+            if not edit.isVisible():
+                return
+            self.activateWindow()
+            QApplication.setActiveWindow(self)
+            edit.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
 
     def _on_text_bg_toggled(self, on: bool) -> None:
         self.text_bg = bool(on)
@@ -1366,6 +1388,7 @@ class ScreenshotEditor(QWidget):
             self._set_color(c)
             self._refresh_text_swatches()
             self._status_hint = f"字体颜色 {c.name()}（已记住）"
+        QTimer.singleShot(0, lambda: self._focus_text_edit(self._text_edit))
 
     def _pick_text_bg_color(self) -> None:
         c = self._pick_color_dialog(self.text_bg_color, "文字背景色", alpha=True)
@@ -1381,6 +1404,7 @@ class ScreenshotEditor(QWidget):
             self._save_annot_prefs()
             self._refresh_text_swatches()
             self._status_hint = f"背景色已设置（透明度 {c.alpha()}）"
+        QTimer.singleShot(0, lambda: self._focus_text_edit(self._text_edit))
 
     def _pick_text_outline_color(self) -> None:
         c = self._pick_color_dialog(self.text_outline_color, "文字描边色", alpha=False)
@@ -1394,6 +1418,7 @@ class ScreenshotEditor(QWidget):
             self._save_annot_prefs()
             self._refresh_text_swatches()
             self._status_hint = f"描边色 {c.name()}（已记住）"
+        QTimer.singleShot(0, lambda: self._focus_text_edit(self._text_edit))
 
     def _destroy_text_ui(self) -> None:
         if self._text_panel is not None:
