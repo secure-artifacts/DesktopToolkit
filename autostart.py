@@ -22,9 +22,15 @@ def _mac_plist_path() -> Path:
     return Path.home() / "Library/LaunchAgents/com.desktoptoolkit.autostart.plist"
 
 
+def _linux_desktop_path() -> Path:
+    return Path.home() / ".config" / "autostart" / "desktop-toolkit.desktop"
+
+
 def is_autostart_enabled() -> bool:
     if sys.platform == "darwin":
         return _mac_plist_path().is_file()
+    if sys.platform.startswith("linux"):
+        return _linux_desktop_path().is_file()
     if sys.platform != "win32":
         return False
     try:
@@ -44,6 +50,8 @@ def set_autostart(enabled: bool) -> str:
     """Enable/disable run-at-login. Returns status message."""
     if sys.platform == "darwin":
         return _set_autostart_mac(enabled)
+    if sys.platform.startswith("linux"):
+        return _set_autostart_linux(enabled)
     if sys.platform != "win32":
         return "当前系统不支持开机自启设置"
     try:
@@ -95,5 +103,29 @@ def _set_autostart_mac(enabled: bool) -> str:
 """
         plist.write_text(body, encoding="utf-8")
         return "已开启开机自动启动（macOS LaunchAgent）"
+    except Exception as e:
+        return f"设置失败：{e}"
+
+
+def _set_autostart_linux(enabled: bool) -> str:
+    """XDG autostart .desktop entry (~/.config/autostart/)."""
+    desk = _linux_desktop_path()
+    try:
+        if not enabled:
+            if desk.is_file():
+                desk.unlink()
+            return "已关闭开机自动启动"
+        desk.parent.mkdir(parents=True, exist_ok=True)
+        cmd = _launch_command()
+        body = f"""[Desktop Entry]
+Type=Application
+Name=Desktop Toolkit
+Comment=Desktop Toolkit autostart
+Exec={cmd}
+Terminal=false
+X-GNOME-Autostart-enabled=true
+"""
+        desk.write_text(body, encoding="utf-8")
+        return "已开启开机自动启动（Linux XDG autostart）"
     except Exception as e:
         return f"设置失败：{e}"

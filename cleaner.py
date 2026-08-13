@@ -15,6 +15,7 @@ from typing import Callable
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
 
 
 @dataclass
@@ -141,9 +142,26 @@ def _temp_roots() -> list[tuple[str, Path]]:
 
 
 def empty_recycle_bin(report: CleanReport) -> None:
+    if IS_LINUX:
+        # FreeDesktop trash: ~/.local/share/Trash
+        trash = Path.home() / ".local" / "share" / "Trash"
+        if not trash.exists():
+            return
+        before = report.bytes_freed
+        try:
+            for sub in ("files", "info"):
+                d = trash / sub
+                if d.is_dir():
+                    _clear_directory_contents(d, report, "回收站")
+            if report.bytes_freed > before:
+                report.notes.append("回收站(Trash)")
+        except Exception as exc:  # noqa: BLE001
+            report.errors.append(f"回收站: {exc}")
+        return
+    if not IS_WIN:
+        return
     try:
         import ctypes
-        from ctypes import wintypes
 
         # SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND
         flags = 0x00000001 | 0x00000002 | 0x00000004

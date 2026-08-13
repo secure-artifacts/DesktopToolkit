@@ -660,7 +660,7 @@ class RecorderConfig:
     target: dict | None = None
     mic_idx: int | None = None
     sys_idx: int | None = None
-    fps: int = 24
+    fps: int = 30
     resolution: str = "1080p"  # 1080p | 720p
     highlight_cursor: bool = True
     cursor_color_bgr: tuple[int, int, int] = (0, 255, 255)
@@ -709,7 +709,7 @@ class ScreenRecorder:
             target=kwargs.get("target"),
             mic_idx=kwargs.get("mic_idx"),
             sys_idx=kwargs.get("sys_idx"),
-            fps=int(kwargs.get("fps") or 24),
+            fps=int(kwargs.get("fps") or 30),
             resolution=str(kwargs.get("resolution") or "1080p"),
             highlight_cursor=bool(kwargs.get("highlight_cursor", True)),
             cursor_color_bgr=kwargs.get("cursor_color_bgr", (0, 255, 255)),

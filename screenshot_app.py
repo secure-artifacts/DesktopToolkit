@@ -39,11 +39,13 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -113,7 +115,7 @@ def capture_virtual_desktop() -> tuple[QPixmap, QRect]:
 
 @dataclass
 class Stroke:
-    kind: str  # pen|marker|arrow|rect|ellipse|text|number|pixelate|blur|fill
+    kind: str  # pen|marker|arrow|rect|ellipse|text|number|emoji|pixelate|blur|fill
     points: list[QPointF] = field(default_factory=list)
     color: QColor = field(default_factory=lambda: QColor("#ff0000"))
     width: float = 6.0
@@ -125,6 +127,19 @@ class Stroke:
     outline_color: QColor | None = None  # stroke/outline around text
     # for pixelate/blur: store processed pixmap of the rect region after apply
     baked: QImage | None = None
+
+
+# Common emoji stamps for annotation (Unicode — no asset pack needed)
+EMOJI_PALETTE: list[str] = [
+    "😀", "😁", "😂", "🤣", "😊", "😍", "🥰", "😘", "😎", "🤔",
+    "😅", "😢", "😭", "😡", "🤯", "😴", "🥳", "😇", "🤩", "😏",
+    "👍", "👎", "👏", "🙏", "💪", "🤝", "✌️", "👌", "🤞", "👋",
+    "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "💔", "💯", "✨",
+    "🔥", "⭐", "🌟", "⚡", "💥", "🎉", "🎊", "🎈", "🎁", "🏆",
+    "✅", "❌", "⚠️", "❗", "❓", "💡", "📌", "📍", "📎", "📝",
+    "👀", "💬", "💭", "📢", "🔔", "🚀", "🎯", "🐛", "🛠️", "💻",
+    "📱", "🖥️", "⏱️", "📅", "🔒", "🔑", "💰", "📈", "📉", "🧾",
+]
 
 
 # In-canvas dock tools (drawn around selection like Flameshot — always visible)
@@ -139,6 +154,7 @@ DOCK_TOOL_ROW: list[tuple[str, str, str, str]] = [
     ("fill", "fill", "色块", "tool"),
     ("text", "text", "文字", "tool"),
     ("number", "number", "序号", "tool"),
+    ("emoji", "emoji", "表情", "tool"),
     ("pixelate", "pixelate", "马赛克", "tool"),
     ("blur", "blur", "模糊", "tool"),
 ]
@@ -300,6 +316,8 @@ class ScreenshotEditor(QWidget):
         self._text_panel: QWidget | None = None
         self._text_anchor = QPoint()
         self._text_preview: str = ""  # live WYSIWYG draft while typing
+        self._emoji_char = "😀"
+        self._emoji_panel: QWidget | None = None
 
         self._pinned: list[PinnedShot] = []
         self._action_shortcuts: list[QShortcut] = []
@@ -400,7 +418,12 @@ class ScreenshotEditor(QWidget):
         self.drawing = False
         self.cur_stroke = None
         self.setCursor(Qt.CursorShape.CrossCursor)
-        self._status_hint = f"当前工具：{t} · 在选区内拖动画图"
+        if t == "emoji":
+            self._status_hint = f"表情 {self._emoji_char} · 点选区盖章 · 可再开面板换表情"
+            self._show_emoji_panel()
+        else:
+            self._hide_emoji_panel()
+            self._status_hint = f"当前工具：{t} · 在选区内拖动画图"
         self._rebuild_dock()
         self.update()
         self.activateWindow()
@@ -749,6 +772,12 @@ class ScreenshotEditor(QWidget):
             p.setPen(QPen(QColor(15, 23, 42), 2))
             p.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
             p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "1")
+        elif icon_id == "emoji":
+            # Prefer color emoji fonts when available
+            font = QFont("Segoe UI Emoji", 14)
+            font.setFamilies(["Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI Symbol"])
+            p.setFont(font)
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "😀")
         elif icon_id == "pixelate":
             for i in range(3):
                 for j in range(3):
@@ -1050,6 +1079,8 @@ class ScreenshotEditor(QWidget):
                 p.drawEllipse(r)
         elif st.kind == "text" and st.points:
             self._paint_text_label(p, st, col)
+        elif st.kind == "emoji" and st.points:
+            self._paint_emoji(p, st)
         elif st.kind == "number" and st.points:
             r = 12 + st.width
             c = st.points[0]
@@ -1071,6 +1102,112 @@ class ScreenshotEditor(QWidget):
         if not font.exactMatch():
             font = QFont("Segoe UI", fs, QFont.Weight.Bold)
         return font
+
+    def _emoji_font_for_width(self, width: float) -> QFont:
+        fs = max(18, int(float(width) * 5.5))
+        font = QFont("Segoe UI Emoji", fs)
+        font.setFamilies(
+            ["Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Segoe UI Symbol", "Segoe UI"]
+        )
+        return font
+
+    def _paint_emoji(self, p: QPainter, st: Stroke) -> None:
+        ch = (st.text or "").strip() or "😀"
+        font = self._emoji_font_for_width(st.width)
+        p.setFont(font)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        fm = p.fontMetrics()
+        pt = st.points[0]
+        size = max(fm.height(), fm.horizontalAdvance(ch), 20)
+        box = QRectF(pt.x() - size / 2.0, pt.y() - size / 2.0, size, size)
+        p.setPen(Qt.GlobalColor.black)
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, ch)
+
+    def _hide_emoji_panel(self) -> None:
+        if self._emoji_panel is not None:
+            try:
+                self._emoji_panel.hide()
+                self._emoji_panel.deleteLater()
+            except Exception:
+                pass
+            self._emoji_panel = None
+
+    def _pick_emoji(self, ch: str) -> None:
+        self._emoji_char = ch or "😀"
+        self._status_hint = f"表情 {self._emoji_char} · 在选区点击盖章 · 滚轮调大小"
+        self.update()
+
+    def _show_emoji_panel(self) -> None:
+        """Floating emoji palette near selection (does not block stamping)."""
+        self._hide_emoji_panel()
+        panel = QWidget(self)
+        panel.setObjectName("emojiPanel")
+        panel.setStyleSheet(
+            """
+            QWidget#emojiPanel {
+                background: rgba(15, 23, 42, 0.97);
+                border: 2px solid #38bdf8;
+                border-radius: 10px;
+            }
+            QPushButton {
+                background: #1e293b; border: 1px solid #334155; border-radius: 6px;
+                font-size: 18px; min-width: 34px; min-height: 34px; padding: 2px;
+            }
+            QPushButton:hover { background: #0ea5e9; border-color: #38bdf8; }
+            QPushButton#soft {
+                background: #334155; color: #e2e8f0; font-size: 12px; font-weight: 700;
+                min-width: 64px; min-height: 28px;
+            }
+            QLabel#hint { color: #94a3b8; font-size: 11px; }
+            """
+        )
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        root.addWidget(QLabel(f"当前：{self._emoji_char}  ·  点表情选用，再点截图盖章", objectName="hint"))
+
+        scroll = QScrollArea(panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(168)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        holder = QWidget()
+        grid = QGridLayout(holder)
+        grid.setSpacing(4)
+        grid.setContentsMargins(2, 2, 2, 2)
+        cols = 10
+        for i, ch in enumerate(EMOJI_PALETTE):
+            btn = QPushButton(ch)
+            btn.setToolTip(ch)
+            btn.clicked.connect(lambda _=False, c=ch: self._pick_emoji(c))
+            grid.addWidget(btn, i // cols, i % cols)
+        scroll.setWidget(holder)
+        root.addWidget(scroll)
+
+        row = QHBoxLayout()
+        btn_close = QPushButton("收起面板", objectName="soft")
+        btn_close.clicked.connect(self._hide_emoji_panel)
+        row.addWidget(btn_close)
+        row.addStretch(1)
+        root.addLayout(row)
+
+        panel.adjustSize()
+        pw = max(panel.sizeHint().width(), 390)
+        ph = max(panel.sizeHint().height(), 230)
+        panel.resize(pw, ph)
+        s = self.sel.normalized()
+        if s.isNull() or s.width() < 4:
+            s = self.rect()
+        x = max(6, min(s.left() + 8, self.width() - pw - 6))
+        y = max(6, min(s.bottom() - ph - 8 if s.bottom() - ph - 8 > s.top() else s.top() + 8, self.height() - ph - 6))
+        # Prefer below dock if dock is above selection bottom
+        if not self._dock_panel.isNull():
+            y = min(max(6, self._dock_panel.bottom() + 8), self.height() - ph - 6)
+            x = max(6, min(self._dock_panel.left(), self.width() - pw - 6))
+        panel.move(x, y)
+        panel.show()
+        panel.raise_()
+        self._emoji_panel = panel
+        self._status_hint = f"表情 {self._emoji_char} · 先点表情再点选区盖章"
 
     def _paint_text_label(self, p: QPainter, st: Stroke, col: QColor) -> None:
         """Draw text with optional solid background + outline (readable on clutter)."""
@@ -1618,6 +1755,10 @@ class ScreenshotEditor(QWidget):
             else:
                 return
 
+        # Clicks on emoji palette stay in the panel (child handles buttons)
+        if self._emoji_panel is not None and self._emoji_panel.geometry().contains(pos):
+            return
+
         # ---- SELECT PHASE: drag out a region ----
         if self.phase == "select":
             self.selecting = True
@@ -1662,6 +1803,22 @@ class ScreenshotEditor(QWidget):
             self.strokes.append(st)
             self.drawing = False
             self._status_hint = f"已添加序号 {st.number} · 共 {len(self.strokes)} 笔"
+            self.update()
+            return
+
+        if self.tool == "emoji":
+            ch = (self._emoji_char or "😀").strip() or "😀"
+            st = Stroke(
+                kind="emoji",
+                points=[QPointF(pos)],
+                color=QColor(self.color),
+                width=float(self.pen_w),
+                text=ch,
+            )
+            self.strokes.append(st)
+            self.drawing = False
+            self.redo_stack.clear()
+            self._status_hint = f"已添加表情 {ch} · 共 {len(self.strokes)} 笔 · 滚轮调大小"
             self.update()
             return
 
