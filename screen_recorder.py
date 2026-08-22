@@ -366,27 +366,44 @@ def _silent_subprocess_kwargs() -> dict:
 # Capture
 # ---------------------------------------------------------------------------
 
+_thread_local = threading.local()
+
+
+def _mss_instance():
+    """Reuse one mss handle per thread — creating mss every frame is a major lag source."""
+    sct = getattr(_thread_local, "sct", None)
+    if sct is None:
+        sct = mss.mss()
+        _thread_local.sct = sct
+    return sct
+
+
 def capture_bgr(region: dict | None = None) -> np.ndarray | None:
     """Capture region as BGR uint8 array. region: left,top,width,height or None for primary."""
     if mss is not None:
         try:
-            with mss.mss() as sct:
-                if region is None:
-                    mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                    shot = sct.grab(mon)
-                else:
-                    shot = sct.grab(
-                        {
-                            "left": int(region["left"]),
-                            "top": int(region["top"]),
-                            "width": max(2, int(region["width"])),
-                            "height": max(2, int(region["height"])),
-                        }
-                    )
-                # BGRA -> BGR
-                frame = np.array(shot, dtype=np.uint8)
-                return frame[:, :, :3].copy()
+            sct = _mss_instance()
+            if region is None:
+                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                shot = sct.grab(mon)
+            else:
+                shot = sct.grab(
+                    {
+                        "left": int(region["left"]),
+                        "top": int(region["top"]),
+                        "width": max(2, int(region["width"])),
+                        "height": max(2, int(region["height"])),
+                    }
+                )
+            # BGRA -> BGR contiguous
+            arr = np.asarray(shot)  # HxWx4 BGRA
+            return np.ascontiguousarray(arr[:, :, :3])
         except Exception as exc:
+            # Reset broken mss handle then fall through to GDI
+            try:
+                _thread_local.sct = None
+            except Exception:
+                pass
             print(f"mss capture failed: {exc}", flush=True)
 
     # GDI fallback (Windows only)
@@ -478,10 +495,9 @@ def draw_cursor_highlight(
     h, w = frame_bgr.shape[:2]
     if rx < -radius or ry < -radius or rx > w + radius or ry > h + radius:
         return
-    overlay = frame_bgr.copy()
-    cv2.circle(overlay, (int(rx), int(ry)), radius, color_bgr, -1, lineType=cv2.LINE_AA)
-    cv2.addWeighted(overlay, 0.35, frame_bgr, 0.65, 0, frame_bgr)
+    # Cheap ring + tip (avoid full-frame copy + addWeighted which lagged UI)
     cv2.circle(frame_bgr, (int(rx), int(ry)), radius, color_bgr, 2, lineType=cv2.LINE_AA)
+    cv2.circle(frame_bgr, (int(rx), int(ry)), max(3, radius // 4), color_bgr, -1, lineType=cv2.LINE_AA)
     if show_pointer:
         pts = np.array(
             [[rx, ry], [rx + 14, ry + 14], [rx + 4, ry + 16]],
@@ -492,7 +508,7 @@ def draw_cursor_highlight(
 
 
 def blend_overlay_rgba(frame_bgr: np.ndarray, overlay_rgba: np.ndarray | None) -> np.ndarray:
-    """Alpha-blend RGBA overlay onto BGR frame."""
+    """Alpha-blend RGBA overlay onto BGR frame (fast path for sparse brush strokes)."""
     if overlay_rgba is None:
         return frame_bgr
     try:
@@ -500,17 +516,25 @@ def blend_overlay_rgba(frame_bgr: np.ndarray, overlay_rgba: np.ndarray | None) -
             overlay_rgba = cv2.resize(
                 overlay_rgba,
                 (frame_bgr.shape[1], frame_bgr.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
+                interpolation=cv2.INTER_NEAREST,
             )
         if overlay_rgba.shape[2] < 4:
             return frame_bgr
-        alpha = overlay_rgba[:, :, 3:4].astype(np.float32) / 255.0
-        if float(alpha.max()) < 0.01:
+        alpha_u8 = overlay_rgba[:, :, 3]
+        if int(alpha_u8.max()) < 3:
             return frame_bgr
-        rgb = overlay_rgba[:, :, :3][:, :, ::-1].astype(np.float32)  # RGB->BGR
-        base = frame_bgr.astype(np.float32)
-        out = base * (1.0 - alpha) + rgb * alpha
-        return out.astype(np.uint8)
+        # Only blend nonzero alpha pixels (brush overlays are sparse)
+        mask = alpha_u8 > 2
+        if not np.any(mask):
+            return frame_bgr
+        a = alpha_u8[mask].astype(np.float32) * (1.0 / 255.0)
+        # overlay stored RGBA; convert RGB->BGR for those pixels
+        src = overlay_rgba[:, :, :3][:, :, ::-1]
+        out = frame_bgr
+        for c in range(3):
+            base = out[:, :, c][mask].astype(np.float32)
+            out[:, :, c][mask] = (base * (1.0 - a) + src[:, :, c][mask].astype(np.float32) * a).astype(np.uint8)
+        return out
     except Exception:
         return frame_bgr
 
@@ -934,11 +958,11 @@ class ScreenRecorder:
                 self._error = f"写帧失败: {exc}"
                 break
 
-            # Preview ~8 fps
-            if self.cfg.preview_cb and (time.time() - self._last_preview_t) > 0.12:
+            # Preview ~4 fps (enough for HUD, less UI contention while recording)
+            if self.cfg.preview_cb and (time.time() - self._last_preview_t) > 0.25:
                 self._last_preview_t = time.time()
                 try:
-                    small = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
+                    small = cv2.resize(frame, (280, 158), interpolation=cv2.INTER_AREA)
                     self.cfg.preview_cb(small)
                 except Exception:
                     pass

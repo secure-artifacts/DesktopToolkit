@@ -506,8 +506,20 @@ class FloatingScreenshotBoard(QWidget):
             self, "选择 OAuth 客户端 JSON", "", "JSON (*.json);;All (*.*)"
         )
         if p:
-            self.txt_secrets.setText(p)
+            try:
+                import os
+                import shutil
+
+                dest_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / "gdrive_client_secrets.json"
+                shutil.copy2(p, dest)
+                self.txt_secrets.setText(str(dest))
+                self.lbl_status.setText(f"密钥已保存到 {dest}，请点「连接 Google」授权")
+            except Exception:
+                self.txt_secrets.setText(p)
             self._save()
+            self._refresh_gstatus()
 
     def _connect_gdrive(self) -> None:
         self._save()

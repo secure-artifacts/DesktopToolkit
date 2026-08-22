@@ -85,7 +85,8 @@ class RecordingDrawOverlay(QWidget):
 
         self.track_timer = QTimer(self)
         self.track_timer.timeout.connect(self._track_region)
-        self.track_timer.start(100)
+        # 250ms is enough to follow moving windows; 100ms burned CPU while drawing
+        self.track_timer.start(250)
 
     def _make_pen_cursor(self) -> None:
         from PyQt6.QtGui import QCursor, QPixmap, QPainterPath
@@ -489,7 +490,8 @@ class FloatingRecorderBoard(QWidget):
         self.duration_timer.timeout.connect(self._tick)
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self._idle_preview)
-        self.preview_timer.start(200)
+        # 500ms idle preview: 200ms full-screen grabs made the hub feel laggy
+        self.preview_timer.start(500)
 
         self._init_ui()
         self._load_settings()
@@ -850,6 +852,12 @@ class FloatingRecorderBoard(QWidget):
         """Show live preview even when not recording."""
         if self.recorder and self.recorder.is_recording:
             return
+        # Skip work when page/window not visible (embedded hub especially)
+        try:
+            if not self.isVisible() or self.preview_label.width() < 8:
+                return
+        except Exception:
+            pass
         target = self._current_target()
         region = screen_recorder.resolve_region(target)
         frame = screen_recorder.capture_bgr(region)
@@ -863,7 +871,8 @@ class FloatingRecorderBoard(QWidget):
                 color_bgr=(c.blue(), c.green(), c.red()),
                 radius=int(self.slider_cursor.value()),
             )
-        small = cv2.resize(frame, (360, 200), interpolation=cv2.INTER_AREA)
+        # Downscale early to cut UI cost
+        small = cv2.resize(frame, (320, 180), interpolation=cv2.INTER_AREA)
         self._show_bgr(small)
 
     def _on_preview_frame(self, frame) -> None:
@@ -876,10 +885,10 @@ class FloatingRecorderBoard(QWidget):
             h, w, ch = rgb.shape
             qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
             pix = QPixmap.fromImage(qimg).scaled(
-                self.preview_label.width() - 8,
-                self.preview_label.height() - 8,
+                max(8, self.preview_label.width() - 8),
+                max(8, self.preview_label.height() - 8),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
+                Qt.TransformationMode.FastTransformation,
             )
             self.preview_label.setPixmap(pix)
         except Exception:
@@ -1230,7 +1239,7 @@ class FloatingRecorderBoard(QWidget):
             return
         self._ui_hidden_for_rec = False
         try:
-            self.preview_timer.start(200)
+            self.preview_timer.start(500)
         except Exception:
             pass
         try:

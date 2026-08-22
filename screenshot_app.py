@@ -2062,7 +2062,8 @@ class ScreenshotEditor(QWidget):
             return
         if act == "upload":
             if not self.on_upload:
-                self._status_hint = "未配置云端：请在截图设置里连接 Google Drive"
+                why = getattr(self, "_upload_block_reason", "") or "未配置云端：请在截图设置里选择密钥并点「连接 Google」"
+                self._status_hint = why
                 self.update()
                 return
             tmp = Path(tempfile.gettempdir()) / f"parrot_shot_{int(time.time())}.png"
@@ -2262,16 +2263,31 @@ def start_screenshot(
 
         on_upload = None
         g = cfg.get("gdrive") or {}
+        upload_block_reason = ""
         if g.get("enabled"):
             try:
                 from gdrive_client import GoogleDriveClient
 
-                if GoogleDriveClient(g).is_connected():
+                client = GoogleDriveClient(g)
+                secrets = str(g.get("client_secrets_path") or "").strip()
+                if not secrets:
+                    upload_block_reason = "已启用云端但未选择 OAuth JSON"
+                elif not Path(secrets).is_file():
+                    upload_block_reason = f"找不到 OAuth JSON: {secrets}"
+                elif not client.is_connected():
+                    upload_block_reason = "已选密钥但未连接 Google（请在截图设置点「连接 Google」）"
+                else:
                     on_upload = do_upload
-            except Exception:
+            except Exception as exc:
                 on_upload = None
+                upload_block_reason = f"云端初始化失败: {exc}"
+        elif g.get("client_secrets_path"):
+            # Secrets present but upload disabled — soft hint only when user hits upload
+            upload_block_reason = "云端未启用：请在截图设置勾选「启用 Google 云端上传」并连接"
 
         ed = ScreenshotEditor(bg, geo, mode=mode, cfg=cfg, on_upload=on_upload)
+        if upload_block_reason and not on_upload:
+            ed._upload_block_reason = upload_block_reason
         _EDITOR_REF = ed
 
         def _fin(img):

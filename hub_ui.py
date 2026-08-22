@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QSize, QUrl, pyqtSignal
@@ -31,6 +32,14 @@ class _UpdateBridge(QObject):
     check_done = pyqtSignal(object, bool)  # result|Exception, silent_if_latest
     progress = pyqtSignal(str)
     download_done = pyqtSignal(object, object)  # path|None, err|None
+
+
+class _GDriveBridge(QObject):
+    """Thread-safe UI callbacks for Google Drive OAuth / test upload."""
+
+    status = pyqtSignal(str)
+    folder_id = pyqtSignal(str)
+
 
 from screenshot_ui import HotkeyCaptureEdit
 from skin import bundle_root
@@ -126,7 +135,7 @@ class MainWindow(QMainWindow):
 
             ver = QLabel(f"v{_VER}")
         except Exception:
-            ver = QLabel("v1.1.6")
+            ver = QLabel("v1.1.7")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -332,23 +341,54 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.hk_full)
         self._hk_applying = False
         g = cfg.setdefault("gdrive", {})
+        tip_g = QLabel(
+            "云端上传步骤：① 选择 OAuth JSON ② 点「连接 Google」浏览器授权 ③ 保存设置。"
+            "只选文件不连接是无法上传的。"
+        )
+        tip_g.setObjectName("muted")
+        tip_g.setWordWrap(True)
+        rl.addWidget(tip_g)
         self.chk_gdrive = QCheckBox("启用 Google 云端上传")
         self.chk_gdrive.setChecked(bool(g.get("enabled")))
         rl.addWidget(self.chk_gdrive)
         self.chk_auto_up = QCheckBox("完成后自动上传并复制链接")
         self.chk_auto_up.setChecked(bool(cfg.get("auto_upload")))
         rl.addWidget(self.chk_auto_up)
-        rl.addWidget(QLabel("OAuth JSON"))
+        rl.addWidget(QLabel("OAuth JSON（桌面应用客户端密钥）"))
         rowg = QHBoxLayout()
         self.txt_secrets = QLineEdit(str(g.get("client_secrets_path") or ""))
+        self.txt_secrets.setPlaceholderText("client_secret_xxx.json")
         bg = QPushButton("选择…", objectName="soft")
         bg.clicked.connect(self._pick_secrets)
         rowg.addWidget(self.txt_secrets, 1)
         rowg.addWidget(bg)
         rl.addLayout(rowg)
+        self.chk_full_scope = QCheckBox("完整 Drive 权限（可上传到任意已有文件夹）")
+        self.chk_full_scope.setChecked(bool(g.get("use_full_scope")))
+        rl.addWidget(self.chk_full_scope)
+        rl.addWidget(QLabel("目标文件夹 ID（可选，Drive 网址 folders/ 后面）"))
         self.txt_folder = QLineEdit(str(g.get("folder_id") or ""))
-        self.txt_folder.setPlaceholderText("文件夹 ID 可选")
+        self.txt_folder.setPlaceholderText("不填则自动创建下方文件夹名")
         rl.addWidget(self.txt_folder)
+        rl.addWidget(QLabel("自动创建文件夹名（无 ID 时）"))
+        self.txt_folder_name = QLineEdit(str(g.get("folder_name") or "桌面工具截图"))
+        self.txt_folder_name.setPlaceholderText("桌面工具截图")
+        rl.addWidget(self.txt_folder_name)
+        grow = QHBoxLayout()
+        self.btn_g_connect = QPushButton("连接 Google")
+        self.btn_g_connect.clicked.connect(self._connect_gdrive)
+        self.btn_g_disconnect = QPushButton("断开", objectName="soft")
+        self.btn_g_disconnect.clicked.connect(self._disconnect_gdrive)
+        self.btn_g_test = QPushButton("测试上传", objectName="soft")
+        self.btn_g_test.clicked.connect(self._test_gdrive_upload)
+        grow.addWidget(self.btn_g_connect)
+        grow.addWidget(self.btn_g_disconnect)
+        grow.addWidget(self.btn_g_test)
+        rl.addLayout(grow)
+        self.lbl_gstatus = QLabel("")
+        self.lbl_gstatus.setObjectName("muted")
+        self.lbl_gstatus.setWordWrap(True)
+        rl.addWidget(self.lbl_gstatus)
         save = QPushButton("保存设置", objectName="primary")
         save.clicked.connect(lambda: self._save_shot_settings(True))
         rl.addWidget(save)
@@ -357,6 +397,11 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.lbl_shot_status)
         rl.addStretch(1)
         lay.addWidget(panel, 1)
+        # GDrive async bridge
+        self._gdrive_bridge = _GDriveBridge(self)
+        self._gdrive_bridge.status.connect(self._on_gdrive_status)
+        self._gdrive_bridge.folder_id.connect(self._on_gdrive_folder_id)
+        self._refresh_gdrive_status()
         return page
 
     def _pick_shot_dir(self) -> None:
@@ -367,7 +412,21 @@ class MainWindow(QMainWindow):
     def _pick_secrets(self) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "OAuth JSON", "", "JSON (*.json)")
         if p:
-            self.txt_secrets.setText(p)
+            # Copy into app data so later moves of the original file don't break upload
+            try:
+                import os
+                import shutil
+
+                dest_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / "gdrive_client_secrets.json"
+                shutil.copy2(p, dest)
+                self.txt_secrets.setText(str(dest))
+                self.lbl_shot_status.setText(f"已复制密钥到 {dest}，请点「连接 Google」完成授权")
+            except Exception:
+                self.txt_secrets.setText(p)
+            self._save_shot_settings(False)
+            self._refresh_gdrive_status()
 
     def _pause_shot_hotkeys(self) -> None:
         try:
@@ -383,6 +442,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _gdrive_cfg_from_ui(self) -> dict:
+        return {
+            "enabled": bool(self.chk_gdrive.isChecked()),
+            "client_secrets_path": self.txt_secrets.text().strip(),
+            "folder_id": self.txt_folder.text().strip(),
+            "folder_name": self.txt_folder_name.text().strip() or "桌面工具截图",
+            "use_full_scope": bool(self.chk_full_scope.isChecked()),
+        }
+
     def _save_shot_settings(self, apply_hk: bool = False) -> None:
         self._hk_applying = True
         try:
@@ -392,9 +460,7 @@ class MainWindow(QMainWindow):
             cfg["hotkey_region"] = self.hk_region.text().strip() or "Ctrl+Alt+A"
             cfg["hotkey_full"] = self.hk_full.text().strip() or "Ctrl+Alt+Shift+A"
             cfg["auto_upload"] = self.chk_auto_up.isChecked()
-            g["enabled"] = self.chk_gdrive.isChecked()
-            g["client_secrets_path"] = self.txt_secrets.text().strip()
-            g["folder_id"] = self.txt_folder.text().strip()
+            g.update(self._gdrive_cfg_from_ui())
             self.host.store.save_state()
             msg = "已保存"
             if apply_hk:
@@ -402,9 +468,149 @@ class MainWindow(QMainWindow):
                     msg = self.host.rebind_screenshot_hotkeys() or msg
                 except Exception as e:
                     msg = str(e)
+            # Remind if secrets saved but not connected
+            try:
+                from gdrive_client import GoogleDriveClient
+
+                if g.get("enabled") and g.get("client_secrets_path") and not GoogleDriveClient(g).is_connected():
+                    msg += " · 尚未连接 Google，请点「连接 Google」授权"
+            except Exception:
+                pass
             self.lbl_shot_status.setText(msg)
+            self._refresh_gdrive_status()
         finally:
             self._hk_applying = False
+
+    def _refresh_gdrive_status(self) -> None:
+        try:
+            from gdrive_client import GoogleDriveClient
+
+            gd = self._gdrive_cfg_from_ui()
+            client = GoogleDriveClient(gd)
+            secrets = gd.get("client_secrets_path") or ""
+            if not secrets:
+                self.lbl_gstatus.setText("未配置密钥 — 请选择 OAuth JSON")
+            elif client.is_connected():
+                fid = gd.get("folder_id") or "（自动文件夹）"
+                self.lbl_gstatus.setText(f"✅ 已连接 Google · 目标: {fid}")
+            else:
+                self.lbl_gstatus.setText("密钥已选，但未授权 — 请点「连接 Google」")
+        except Exception as e:
+            self.lbl_gstatus.setText(f"状态: {e}")
+
+    def _on_gdrive_status(self, msg: str) -> None:
+        self.lbl_shot_status.setText(msg)
+        self.lbl_gstatus.setText(msg)
+        self._refresh_gdrive_status()
+
+    def _on_gdrive_folder_id(self, fid: str) -> None:
+        if fid:
+            self.txt_folder.setText(fid)
+            cfg = self.host.store.state.setdefault("screenshot", {})
+            cfg.setdefault("gdrive", {})["folder_id"] = fid
+            try:
+                self.host.store.save_state()
+            except Exception:
+                pass
+
+    def _connect_gdrive(self) -> None:
+        self._save_shot_settings(False)
+        secrets_path = self.txt_secrets.text().strip()
+        if not secrets_path:
+            self.lbl_shot_status.setText("请先选择 OAuth 客户端 JSON 文件")
+            return
+        if not Path(secrets_path).is_file():
+            self.lbl_shot_status.setText(f"找不到密钥文件: {secrets_path}")
+            return
+        self.lbl_shot_status.setText("正在授权…请在浏览器中登录 Google")
+        self.btn_g_connect.setEnabled(False)
+
+        def work() -> None:
+            try:
+                from gdrive_client import GoogleDriveClient
+
+                gd = self._gdrive_cfg_from_ui()
+                # Persist into store so authorize uses same paths
+                self.host.store.state.setdefault("screenshot", {}).setdefault("gdrive", {}).update(gd)
+                client = GoogleDriveClient(gd)
+                client.authorize_interactive(on_status=lambda m: self._gdrive_bridge.status.emit(m))
+                # Mark enabled after successful auth
+                gd["enabled"] = True
+                try:
+                    fid = client.ensure_folder()
+                    gd["folder_id"] = str(fid)
+                    self._gdrive_bridge.folder_id.emit(str(fid))
+                    self._gdrive_bridge.status.emit(f"✅ 已连接，文件夹 ID: {fid}")
+                except Exception as e:
+                    self._gdrive_bridge.status.emit(f"✅ 已连接（文件夹稍后创建）: {e}")
+                self.host.store.state.setdefault("screenshot", {}).setdefault("gdrive", {}).update(gd)
+                self.host.store.state["screenshot"]["gdrive"]["enabled"] = True
+                try:
+                    self.host.store.save_state()
+                except Exception:
+                    pass
+            except Exception as e:
+                self._gdrive_bridge.status.emit(f"连接失败: {e}")
+            finally:
+                from PyQt6.QtCore import QTimer
+
+                QTimer.singleShot(0, lambda: self.btn_g_connect.setEnabled(True))
+                QTimer.singleShot(0, lambda: self.chk_gdrive.setChecked(True))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _disconnect_gdrive(self) -> None:
+        try:
+            from gdrive_client import GoogleDriveClient
+
+            GoogleDriveClient(self._gdrive_cfg_from_ui()).clear_token()
+            self.lbl_shot_status.setText("已断开 Google 连接")
+            self._refresh_gdrive_status()
+        except Exception as e:
+            self.lbl_shot_status.setText(f"断开失败: {e}")
+
+    def _test_gdrive_upload(self) -> None:
+        self._save_shot_settings(False)
+        from PyQt6.QtGui import QImage, QColor, QPainter
+        import tempfile
+        import time
+
+        img = QImage(160, 48, QImage.Format.Format_ARGB32)
+        img.fill(QColor(14, 165, 233))
+        p = QPainter(img)
+        p.setPen(QColor("white"))
+        p.drawText(img.rect(), Qt.AlignmentFlag.AlignCenter, "ToolkitShot")
+        p.end()
+        tmp = Path(tempfile.gettempdir()) / f"toolkit_gdrive_test_{int(time.time())}.png"
+        img.save(str(tmp))
+        self.lbl_shot_status.setText("正在测试上传…")
+
+        def work() -> None:
+            try:
+                from gdrive_client import GoogleDriveClient
+
+                gd = self._gdrive_cfg_from_ui()
+                client = GoogleDriveClient(gd)
+                if not client.is_connected():
+                    self._gdrive_bridge.status.emit("测试失败：尚未连接 Google，请先点「连接 Google」")
+                    return
+                r = client.upload_file(tmp, on_status=lambda m: self._gdrive_bridge.status.emit(m))
+                link = r.get("webViewLink") or ""
+                self._gdrive_bridge.status.emit(f"测试上传成功 {r.get('name', '')} {link}")
+                self.host.store.state.setdefault("screenshot", {}).setdefault("gdrive", {}).update(gd)
+                try:
+                    self.host.store.save_state()
+                except Exception:
+                    pass
+            except Exception as e:
+                self._gdrive_bridge.status.emit(f"测试上传失败: {e}")
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _page_record(self) -> QWidget:
         from recorder_ui import FloatingRecorderBoard
@@ -601,7 +807,7 @@ class MainWindow(QMainWindow):
 
             ver_txt = APP_VERSION
         except Exception:
-            ver_txt = "1.1.6"
+            ver_txt = "1.1.7"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)
