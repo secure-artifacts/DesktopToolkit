@@ -125,6 +125,7 @@ class FloatingAssistant(QWidget):
             ("便签", self._act_notes),
             ("番茄钟", self._act_pomo),
             ("闹钟", self._act_alarm),
+            ("天气播报", self._act_weather),
             ("区域截图", self._act_shot),
             ("录屏", self._act_record),
             ("音乐播放器", self._act_music),
@@ -286,6 +287,14 @@ class FloatingAssistant(QWidget):
     def _act_alarm(self) -> None:
         self._tip("打开闹钟")
         self.host.show_alarm_board()
+        self.menu.hide()
+
+    def _act_weather(self) -> None:
+        self._tip("正在获取天气…")
+        try:
+            self.host.announce_weather(force=True)
+        except Exception:
+            pass
         self.menu.hide()
 
     def _act_shot(self) -> None:

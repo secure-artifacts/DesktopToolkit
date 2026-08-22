@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -90,12 +91,17 @@ class ToolkitApp(QObject):
         self.alarm_timer = QTimer(self)
         self.alarm_timer.timeout.connect(self._alarm_tick)
         self.alarm_timer.start(1000)
+        self.weather_timer = QTimer(self)
+        self.weather_timer.timeout.connect(self._weather_tick)
+        self._weather_busy = False
+        self.reload_weather_scheduler()
         self.store.append_log("login", "Desktop Toolkit started")
         QTimer.singleShot(200, self.show_hub)
         QTimer.singleShot(400, self._init_assistant)
         QTimer.singleShot(800, lambda: self.announce("桌面工具箱已就绪"))
         # Quiet update check shortly after startup (prefs.auto_check_update)
         QTimer.singleShot(3500, self._startup_check_update)
+        QTimer.singleShot(6000, self._weather_boot_announce)
 
     def _cb(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -231,6 +237,73 @@ class ToolkitApp(QObject):
             self.hotkeys.resume_screenshot_hotkeys()
         except Exception:
             pass
+
+    def reload_weather_scheduler(self) -> None:
+        """Start/stop periodic weather TTS from prefs."""
+        try:
+            self.weather_timer.stop()
+        except Exception:
+            pass
+        cfg = self.store.state.get("weather") or {}
+        if not cfg.get("enabled"):
+            return
+        mins = int(cfg.get("interval_min") or 0)
+        if mins <= 0:
+            return
+        self.weather_timer.start(max(1, mins) * 60 * 1000)
+
+    def _weather_boot_announce(self) -> None:
+        cfg = self.store.state.get("weather") or {}
+        if cfg.get("enabled") and cfg.get("announce_on_start"):
+            self.announce_weather(force=True)
+
+    def _weather_tick(self) -> None:
+        cfg = self.store.state.get("weather") or {}
+        if cfg.get("enabled"):
+            self.announce_weather(force=False)
+
+    def announce_weather(self, *, force: bool = False) -> None:
+        """Fetch local weather and announce (subtitle + optional voice)."""
+        if self._weather_busy:
+            return
+        cfg = dict(self.store.state.setdefault("weather", {}))
+        if not force and not cfg.get("enabled"):
+            return
+        self._weather_busy = True
+
+        def work() -> None:
+            msg = ""
+            try:
+                from weather import fetch_weather
+
+                report = fetch_weather(cfg)
+                msg = report.speak_text()
+                # Persist last resolved coords for convenience
+                try:
+                    w = self.store.state.setdefault("weather", {})
+                    w["latitude"] = f"{report.latitude:.5f}"
+                    w["longitude"] = f"{report.longitude:.5f}"
+                    if report.place and not str(w.get("location_text") or "").strip():
+                        w["location_text"] = report.place
+                    self.store.save_state()
+                except Exception:
+                    pass
+            except Exception as e:
+                msg = f"天气获取失败：{e}"
+            finally:
+                self._weather_busy = False
+            # Back to UI thread via QTimer
+            QTimer.singleShot(0, lambda m=msg: self.announce(m, force_voice=True))
+            try:
+                if self.main_win is not None and hasattr(self.main_win, "lbl_weather_status"):
+                    QTimer.singleShot(
+                        0,
+                        lambda m=msg: self.main_win.lbl_weather_status.setText(m),  # type: ignore[union-attr]
+                    )
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def show_recorder_board(self) -> None:
         from recorder_ui import FloatingRecorderBoard

@@ -60,6 +60,17 @@ DEFAULT_STATE: dict[str, Any] = {
     },
     "music": {},
     "lan": {},
+    "weather": {
+        "enabled": False,
+        "provider": "open-meteo",  # open-meteo (default) | openweathermap
+        "location_mode": "auto",  # auto | manual | coords
+        "location_text": "",
+        "latitude": "",
+        "longitude": "",
+        "owm_api_key": "",
+        "interval_min": 60,  # 0 = only manual
+        "announce_on_start": False,
+    },
 }
 
 _WRITE_LOCK = threading.RLock()

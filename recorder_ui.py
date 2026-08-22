@@ -225,21 +225,16 @@ class RecordingDrawOverlay(QWidget):
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # CRITICAL: non-zero alpha veil so Windows hit-tests this window
+        # Windows hit-tests only non-zero alpha pixels. Use alpha=1 (invisible to eye)
+        # so mss recordings no longer bake in a cyan veil.
         if self.is_draw_mode:
-            p.fillRect(self.rect(), QColor(14, 165, 233, 36))
-            p.setPen(QPen(QColor(56, 189, 248, 220), 3, Qt.PenStyle.DashLine))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(2, 2, max(0, self.width() - 5), max(0, self.height() - 5))
-            p.setPen(QColor(255, 255, 255, 240))
-            p.setFont(self.font())
-            p.drawText(14, 26, "✏️ 画笔模式 · 按住左键拖动画线 · 右键或点右上角关闭")
-            # Exit button (always reachable even when covering full screen)
-            bw, bh = 110, 34
-            self._exit_btn = QRect(max(8, self.width() - bw - 12), 10, bw, bh)
-            p.setBrush(QColor(220, 38, 38, 230))
-            p.setPen(QPen(QColor(255, 255, 255), 1))
-            p.drawRoundedRect(self._exit_btn, 8, 8)
+            p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+            # Compact exit chip only — no cyan border / banner (those get recorded)
+            bw, bh = 96, 28
+            self._exit_btn = QRect(max(8, self.width() - bw - 10), 8, bw, bh)
+            p.setBrush(QColor(220, 38, 38, 210))
+            p.setPen(QPen(QColor(255, 255, 255, 200), 1))
+            p.drawRoundedRect(self._exit_btn, 7, 7)
             p.setPen(QColor(255, 255, 255))
             p.drawText(self._exit_btn, Qt.AlignmentFlag.AlignCenter, "关闭画笔")
         else:
@@ -909,7 +904,7 @@ class FloatingRecorderBoard(QWidget):
             self.control_bar.btn_brush.setChecked(False)
             self.control_bar.btn_brush.setText("画笔开")
             self.control_bar.btn_brush.blockSignals(False)
-        self.lbl_brush_hint.setText("标注用法：点「画笔标注」→ 画面出现淡蓝遮罩 → 按住左键拖动")
+        self.lbl_brush_hint.setText("标注用法：点「画笔标注」→ 在录制区域拖动画线（无青色阴影）")
         self.lbl_brush_hint.setStyleSheet("")
         self._set_status("画笔已关闭")
         try:
@@ -933,15 +928,15 @@ class FloatingRecorderBoard(QWidget):
                 self.overlay.set_draw_mode(True)
                 self.overlay.raise_()
             self.lbl_brush_hint.setText(
-                "✅ 画笔已开：录制区域会有淡蓝遮罩，在遮罩内拖动画线。"
+                "✅ 画笔已开：在录制区域拖动画线（无青色遮罩，不会录进视频）。"
                 "右上角「关闭画笔」或右键可关。"
             )
             self.lbl_brush_hint.setStyleSheet("color: #fbbf24; font-weight: 700;")
-            self._set_status("✏️ 画笔已开 · 在淡蓝遮罩区域拖动 · 右上角可关闭")
+            self._set_status("✏️ 画笔已开 · 区域拖动画线 · 右上角可关闭")
         else:
             if self.overlay:
                 self.overlay.set_draw_mode(False)
-            self.lbl_brush_hint.setText("标注用法：点「画笔标注」→ 画面出现淡蓝遮罩 → 按住左键拖动")
+            self.lbl_brush_hint.setText("标注用法：点「画笔标注」→ 在录制区域拖动画线（无青色阴影）")
             self.lbl_brush_hint.setStyleSheet("")
             self._set_status("画笔关闭：鼠标可正常点击下方窗口")
 
@@ -1168,36 +1163,55 @@ class FloatingRecorderBoard(QWidget):
                 pass
 
     def _stop(self) -> None:
+        """Stop capture immediately, then save — no lingering 'recording/mux' step on UI."""
         if not self.recorder or not self.recorder.is_recording or self._busy_stop:
             return
         self._busy_stop = True
         self.duration_timer.stop()
-        self._set_status("正在快速封装（不重编码画面）…")
+        rec = self.recorder
+
+        # 1) Halt capture right away (leave silent UI / overlay)
+        try:
+            if self.overlay:
+                self.overlay.set_draw_mode(False)
+                self.overlay.hide()
+        except Exception:
+            pass
+        try:
+            self.control_bar.set_recording_ui(False)
+        except Exception:
+            pass
+        self.btn_rec.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.btn_stop.setEnabled(False)
+        self._set_status("已停止 · 选择保存位置…")
         QApplication.processEvents()
 
+        try:
+            rec.halt_capture()
+        except Exception as e:
+            self._bridge.finished.emit(f"停止失败：{e}")
+            return
+
+        # 2) Ask where to save (recording already finished — no more capture)
         save_dir = self.txt_save_dir.text().strip() or str(Path.home() / "Videos")
         Path(save_dir).mkdir(parents=True, exist_ok=True)
         default_name = Path(save_dir) / f"录屏_{self._timestamp()}.mp4"
         path, _ = QFileDialog.getSaveFileName(
             self, "保存录屏", str(default_name), "MP4 视频 (*.mp4)"
         )
-        rec = self.recorder
 
         def worker():
-            if path:
-                msg = rec.stop(path)
-            else:
-                # discard
-                tmp = str(Path(save_dir) / f"_discard_{os.getpid()}.mp4")
-                msg = rec.stop(tmp)
-                try:
-                    if os.path.exists(tmp):
-                        os.remove(tmp)
-                except Exception:
-                    pass
-                msg = "已取消保存"
+            try:
+                if path:
+                    msg = rec.export(path)
+                else:
+                    msg = rec.discard()
+            except Exception as e:
+                msg = f"保存失败：{e}"
             self._bridge.finished.emit(msg)
 
+        # 3) Mux off the UI thread without showing a long "录制保存中" phase
         threading.Thread(target=worker, daemon=True).start()
 
     def _enter_silent_recording_ui(self) -> None:

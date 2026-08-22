@@ -800,13 +800,17 @@ class ScreenRecorder:
         if self.audio_recorder:
             self.audio_recorder.resume()
 
-    def stop(self, final_output_path: str) -> str:
-        """Stop capture and mux. Returns status message. Fast path: stream-copy video."""
+    def halt_capture(self) -> None:
+        """Stop capturing immediately; keep temp files for a later export()."""
         self.is_recording = False
         if self.video_thread:
             self.video_thread.join(timeout=8.0)
+            self.video_thread = None
         if self.audio_recorder:
-            self.audio_recorder.stop()
+            try:
+                self.audio_recorder.stop()
+            except Exception:
+                pass
         if self._ffmpeg:
             try:
                 if self._ffmpeg.stdin:
@@ -822,6 +826,8 @@ class ScreenRecorder:
                     pass
             self._ffmpeg = None
 
+    def export(self, final_output_path: str) -> str:
+        """Mux halted capture to final path (stream-copy video — no re-encode)."""
         out = Path(final_output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         has_audio = os.path.exists(self.temp_audio) and os.path.getsize(self.temp_audio) > 44
@@ -836,6 +842,16 @@ class ScreenRecorder:
         if ok and out.exists():
             return f"已保存：{out}"
         return f"保存失败（{self._error or 'mux error'}）"
+
+    def discard(self) -> str:
+        """Drop temp capture without exporting."""
+        self._cleanup_temp()
+        return "已取消保存"
+
+    def stop(self, final_output_path: str) -> str:
+        """Stop capture and mux. Returns status message. Fast path: stream-copy video."""
+        self.halt_capture()
+        return self.export(final_output_path)
 
     def _cleanup_temp(self) -> None:
         try:

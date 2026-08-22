@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
 
             ver = QLabel(f"v{_VER}")
         except Exception:
-            ver = QLabel("v1.1.8")
+            ver = QLabel("v1.1.9")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -261,6 +261,7 @@ class MainWindow(QMainWindow):
                 [
                     ("music", "音乐播放器", lambda: self.goto("music")),
                     ("clean", "清理电脑", lambda: self.goto("clean")),
+                    ("alarm", "天气播报", lambda: self.host.announce_weather(force=True)),
                 ],
             )
         )
@@ -761,11 +762,19 @@ class MainWindow(QMainWindow):
         return body
 
     def _page_prefs(self) -> QWidget:
+        page = QWidget()
+        page_lay = QVBoxLayout(page)
+        page_lay.setContentsMargins(18, 14, 18, 14)
+        page_lay.setSpacing(8)
+        page_lay.addWidget(QLabel("偏好设置", objectName="pageTitle"))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         lay = QVBoxLayout(body)
-        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setContentsMargins(0, 0, 8, 8)
         lay.setSpacing(10)
-        lay.addWidget(QLabel("偏好设置", objectName="pageTitle"))
 
         lay.addWidget(QLabel("软件外观", objectName="section"))
         row = QHBoxLayout()
@@ -830,6 +839,82 @@ class MainWindow(QMainWindow):
         self.lbl_prefs_status.setObjectName("muted")
         lay.addWidget(self.lbl_prefs_status)
 
+        # ---- Weather broadcast ----
+        wcfg = self.host.store.state.setdefault("weather", {})
+        lay.addWidget(QLabel("天气播报", objectName="section"))
+        tip_w = QLabel(
+            "默认使用 Open-Meteo（欧洲开源气象，整合 ECMWF / DWD / NOAA 等模型，无需密钥）。"
+            "也可选 OpenWeatherMap（需自行填写 API Key）。请设置当地位置。"
+        )
+        tip_w.setObjectName("muted")
+        tip_w.setWordWrap(True)
+        lay.addWidget(tip_w)
+        self.chk_weather = QCheckBox("启用天气播报")
+        self.chk_weather.setChecked(bool(wcfg.get("enabled")))
+        lay.addWidget(self.chk_weather)
+        self.chk_weather_boot = QCheckBox("启动后播报一次")
+        self.chk_weather_boot.setChecked(bool(wcfg.get("announce_on_start")))
+        lay.addWidget(self.chk_weather_boot)
+        from PyQt6.QtWidgets import QComboBox, QSpinBox
+
+        row_prov = QHBoxLayout()
+        row_prov.addWidget(QLabel("数据源"))
+        self.cmb_weather_provider = QComboBox()
+        self.cmb_weather_provider.addItem("Open-Meteo（推荐·免密钥）", "open-meteo")
+        self.cmb_weather_provider.addItem("OpenWeatherMap（需 API Key）", "openweathermap")
+        idx_p = self.cmb_weather_provider.findData(str(wcfg.get("provider") or "open-meteo"))
+        self.cmb_weather_provider.setCurrentIndex(max(0, idx_p))
+        row_prov.addWidget(self.cmb_weather_provider, 1)
+        lay.addLayout(row_prov)
+        row_mode = QHBoxLayout()
+        row_mode.addWidget(QLabel("位置"))
+        self.cmb_weather_mode = QComboBox()
+        self.cmb_weather_mode.addItem("自动（按公网 IP 大致定位）", "auto")
+        self.cmb_weather_mode.addItem("手动城市名", "manual")
+        self.cmb_weather_mode.addItem("经纬度", "coords")
+        idx_m = self.cmb_weather_mode.findData(str(wcfg.get("location_mode") or "auto"))
+        self.cmb_weather_mode.setCurrentIndex(max(0, idx_m))
+        row_mode.addWidget(self.cmb_weather_mode, 1)
+        lay.addLayout(row_mode)
+        self.txt_weather_place = QLineEdit(str(wcfg.get("location_text") or ""))
+        self.txt_weather_place.setPlaceholderText("例如：São Paulo / Lisbon / Shanghai / New York")
+        lay.addWidget(self.txt_weather_place)
+        row_ll = QHBoxLayout()
+        self.txt_weather_lat = QLineEdit(str(wcfg.get("latitude") or ""))
+        self.txt_weather_lat.setPlaceholderText("纬度 lat")
+        self.txt_weather_lon = QLineEdit(str(wcfg.get("longitude") or ""))
+        self.txt_weather_lon.setPlaceholderText("经度 lon")
+        row_ll.addWidget(self.txt_weather_lat)
+        row_ll.addWidget(self.txt_weather_lon)
+        lay.addLayout(row_ll)
+        self.txt_owm_key = QLineEdit(str(wcfg.get("owm_api_key") or ""))
+        self.txt_owm_key.setPlaceholderText("OpenWeatherMap API Key（仅选 OWM 时需要）")
+        self.txt_owm_key.setEchoMode(QLineEdit.EchoMode.Password)
+        lay.addWidget(self.txt_owm_key)
+        row_iv = QHBoxLayout()
+        row_iv.addWidget(QLabel("定时播报间隔（分钟，0=仅手动）"))
+        self.spin_weather_iv = QSpinBox()
+        self.spin_weather_iv.setRange(0, 24 * 60)
+        self.spin_weather_iv.setValue(int(wcfg.get("interval_min") or 60))
+        row_iv.addWidget(self.spin_weather_iv)
+        row_iv.addStretch(1)
+        lay.addLayout(row_iv)
+        wrow = QHBoxLayout()
+        btn_w_save = QPushButton("保存天气设置", objectName="primary")
+        btn_w_save.setMinimumHeight(34)
+        btn_w_save.clicked.connect(self._save_weather_settings)
+        btn_w_now = QPushButton("立即播报", objectName="soft")
+        btn_w_now.setMinimumHeight(34)
+        btn_w_now.clicked.connect(self._weather_announce_now)
+        wrow.addWidget(btn_w_save)
+        wrow.addWidget(btn_w_now)
+        wrow.addStretch(1)
+        lay.addLayout(wrow)
+        self.lbl_weather_status = QLabel("")
+        self.lbl_weather_status.setObjectName("muted")
+        self.lbl_weather_status.setWordWrap(True)
+        lay.addWidget(self.lbl_weather_status)
+
         lay.addWidget(QLabel("快捷键", objectName="section"))
         lay.addWidget(
             QLabel("Ctrl+Alt+T 主窗口 · 截图快捷键在「截图」页设置", objectName="muted")
@@ -841,7 +926,7 @@ class MainWindow(QMainWindow):
 
             ver_txt = APP_VERSION
         except Exception:
-            ver_txt = "1.1.8"
+            ver_txt = "1.1.9"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)
@@ -869,8 +954,42 @@ class MainWindow(QMainWindow):
         self._update_checking = False
 
         lay.addStretch(1)
+        scroll.setWidget(body)
+        page_lay.addWidget(scroll, 1)
         self.apply_theme()
-        return body
+        return page
+
+    def _weather_cfg_from_ui(self) -> dict:
+        return {
+            "enabled": bool(self.chk_weather.isChecked()),
+            "announce_on_start": bool(self.chk_weather_boot.isChecked()),
+            "provider": str(self.cmb_weather_provider.currentData() or "open-meteo"),
+            "location_mode": str(self.cmb_weather_mode.currentData() or "auto"),
+            "location_text": self.txt_weather_place.text().strip(),
+            "latitude": self.txt_weather_lat.text().strip(),
+            "longitude": self.txt_weather_lon.text().strip(),
+            "owm_api_key": self.txt_owm_key.text().strip(),
+            "interval_min": int(self.spin_weather_iv.value()),
+        }
+
+    def _save_weather_settings(self) -> None:
+        cfg = self.host.store.state.setdefault("weather", {})
+        cfg.update(self._weather_cfg_from_ui())
+        self.host.store.save_state()
+        try:
+            self.host.reload_weather_scheduler()
+        except Exception:
+            pass
+        self.lbl_weather_status.setText("天气设置已保存")
+        self.lbl_prefs_status.setText("天气设置已保存")
+
+    def _weather_announce_now(self) -> None:
+        self._save_weather_settings()
+        self.lbl_weather_status.setText("正在获取天气…")
+        try:
+            self.host.announce_weather(force=True)
+        except Exception as e:
+            self.lbl_weather_status.setText(f"播报失败：{e}")
 
     def _prefs(self) -> dict:
         return self.host.store.state.setdefault("prefs", {})
