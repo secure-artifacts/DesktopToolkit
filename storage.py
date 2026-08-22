@@ -12,12 +12,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+def _default_float_assistant() -> bool:
+    # macOS: off by default (logo shouldn't sit permanently on the desktop)
+    return sys.platform != "darwin"
+
+
 DEFAULT_STATE: dict[str, Any] = {
     "app_name": "DesktopToolkit",
     "prefs": {
         "theme": "dark",
         "autostart": False,
-        "float_assistant": True,
+        "float_assistant": _default_float_assistant(),
         "tips_enabled": True,
         "voice_enabled": True,
     },
@@ -60,11 +65,22 @@ DEFAULT_STATE: dict[str, Any] = {
 _WRITE_LOCK = threading.RLock()
 
 
+def app_data_dir(app_name: str = "DesktopToolkit") -> Path:
+    """Platform-correct writable config directory."""
+    configured = os.environ.get("DESKTOP_TOOLKIT_DATA_DIR", "")
+    if configured:
+        return Path(configured)
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / app_name
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / app_name
+    return Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / app_name
+
+
 class JsonStore:
     def __init__(self, app_name: str = "DesktopToolkit") -> None:
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-        configured = os.environ.get("DESKTOP_TOOLKIT_DATA_DIR", "")
-        preferred = Path(configured) if configured else Path(base) / app_name
+        preferred = app_data_dir(app_name)
         self.directory = self._select_writable(preferred, app_name)
         self.state_path = self.directory / "state.json"
         self.log_path = self.directory / "log.json"

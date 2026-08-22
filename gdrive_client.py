@@ -79,8 +79,15 @@ class GoogleDriveClient:
             return Path(p)
         import os
 
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-        return Path(base) / "DesktopToolkit" / "gdrive_token.json"
+        try:
+            from storage import app_data_dir
+
+            return app_data_dir() / "gdrive_token.json"
+        except Exception:
+            import os
+
+            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
+            return Path(base) / "DesktopToolkit" / "gdrive_token.json"
 
     def load_token(self) -> dict | None:
         path = self.token_path()

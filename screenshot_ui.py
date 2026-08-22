@@ -510,7 +510,12 @@ class FloatingScreenshotBoard(QWidget):
                 import os
                 import shutil
 
-                dest_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
+                try:
+                    from storage import app_data_dir
+
+                    dest_dir = app_data_dir()
+                except Exception:
+                    dest_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest = dest_dir / "gdrive_client_secrets.json"
                 shutil.copy2(p, dest)

@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
 
             ver = QLabel(f"v{_VER}")
         except Exception:
-            ver = QLabel("v1.1.7")
+            ver = QLabel("v1.1.8")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -286,7 +286,7 @@ class MainWindow(QMainWindow):
             self.btn_nav_transfer.setChecked(True)
 
     def _page_shot(self) -> QWidget:
-        """Actions on top, settings below (no separate left column)."""
+        """Actions fixed on top; settings scroll so small screens stay usable."""
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(18, 14, 18, 14)
@@ -296,9 +296,11 @@ class MainWindow(QMainWindow):
         act = QHBoxLayout()
         b1 = QPushButton("区域截图")
         b1.setObjectName("primary")
+        b1.setMinimumHeight(36)
         b1.clicked.connect(self.host.start_screenshot_region)
         b2 = QPushButton("全屏截图")
         b2.setObjectName("soft")
+        b2.setMinimumHeight(36)
         b2.clicked.connect(self.host.start_screenshot_full)
         act.addWidget(b1)
         act.addWidget(b2)
@@ -309,10 +311,21 @@ class MainWindow(QMainWindow):
         tip_shot.setWordWrap(True)
         lay.addWidget(tip_shot)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { width: 10px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: #475569; border-radius: 5px; min-height: 32px; }"
+        )
+
         panel = QFrame(objectName="panel")
         rl = QVBoxLayout(panel)
-        rl.setContentsMargins(14, 12, 14, 12)
-        rl.setSpacing(8)
+        rl.setContentsMargins(14, 12, 14, 16)
+        rl.setSpacing(10)
         rl.addWidget(QLabel("截图设置", objectName="pageTitle"))
         cfg = self.host.store.state.setdefault("screenshot", {})
         rl.addWidget(QLabel("保存目录"))
@@ -376,10 +389,13 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.txt_folder_name)
         grow = QHBoxLayout()
         self.btn_g_connect = QPushButton("连接 Google")
+        self.btn_g_connect.setMinimumHeight(34)
         self.btn_g_connect.clicked.connect(self._connect_gdrive)
         self.btn_g_disconnect = QPushButton("断开", objectName="soft")
+        self.btn_g_disconnect.setMinimumHeight(34)
         self.btn_g_disconnect.clicked.connect(self._disconnect_gdrive)
         self.btn_g_test = QPushButton("测试上传", objectName="soft")
+        self.btn_g_test.setMinimumHeight(34)
         self.btn_g_test.clicked.connect(self._test_gdrive_upload)
         grow.addWidget(self.btn_g_connect)
         grow.addWidget(self.btn_g_disconnect)
@@ -390,13 +406,17 @@ class MainWindow(QMainWindow):
         self.lbl_gstatus.setWordWrap(True)
         rl.addWidget(self.lbl_gstatus)
         save = QPushButton("保存设置", objectName="primary")
+        save.setMinimumHeight(38)
         save.clicked.connect(lambda: self._save_shot_settings(True))
         rl.addWidget(save)
         self.lbl_shot_status = QLabel("")
         self.lbl_shot_status.setObjectName("muted")
+        self.lbl_shot_status.setWordWrap(True)
         rl.addWidget(self.lbl_shot_status)
         rl.addStretch(1)
-        lay.addWidget(panel, 1)
+
+        scroll.setWidget(panel)
+        lay.addWidget(scroll, 1)
         # GDrive async bridge
         self._gdrive_bridge = _GDriveBridge(self)
         self._gdrive_bridge.status.connect(self._on_gdrive_status)
@@ -417,7 +437,12 @@ class MainWindow(QMainWindow):
                 import os
                 import shutil
 
-                dest_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
+                try:
+                    from storage import app_data_dir
+
+                    dest_dir = app_data_dir()
+                except Exception:
+                    dest_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest = dest_dir / "gdrive_client_secrets.json"
                 shutil.copy2(p, dest)
@@ -768,11 +793,20 @@ class MainWindow(QMainWindow):
         self.chk_autostart.toggled.connect(self._on_autostart)
         lay.addWidget(self.chk_autostart)
 
-        self.chk_float_logo = QCheckBox("显示右下角悬浮机器人助手")
-        self.chk_float_logo.setChecked(bool(prefs.get("float_assistant", True)))
+        try:
+            from float_assistant import default_float_assistant_enabled
+
+            float_default = default_float_assistant_enabled()
+        except Exception:
+            float_default = True
+        self.chk_float_logo = QCheckBox("显示悬浮机器人助手（可拖动，记住位置）")
+        self.chk_float_logo.setChecked(bool(prefs.get("float_assistant", float_default)))
         self.chk_float_logo.toggled.connect(self._on_float_logo)
         lay.addWidget(self.chk_float_logo)
-        tip_a = QLabel("鼠标悬停在机器人上可快速打开：待办 / 便签 / 番茄钟 / 闹钟 / 截图 / 录屏 / 音乐 / 清理")
+        tip_a = QLabel(
+            "悬停打开快捷菜单；拖到任意位置后会记住。"
+            "macOS 默认关闭，需要时再勾选。关闭后不会一直停在角落。"
+        )
         tip_a.setObjectName("muted")
         tip_a.setWordWrap(True)
         lay.addWidget(tip_a)
@@ -807,7 +841,7 @@ class MainWindow(QMainWindow):
 
             ver_txt = APP_VERSION
         except Exception:
-            ver_txt = "1.1.7"
+            ver_txt = "1.1.8"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)

@@ -490,8 +490,10 @@ class FloatingRecorderBoard(QWidget):
         self.duration_timer.timeout.connect(self._tick)
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self._idle_preview)
-        # 500ms idle preview: 200ms full-screen grabs made the hub feel laggy
-        self.preview_timer.start(500)
+        # Idle preview interval: macOS mss/CG is heavier — use slower tick
+        import sys as _sys
+
+        self.preview_timer.start(750 if _sys.platform == "darwin" else 500)
 
         self._init_ui()
         self._load_settings()
@@ -1239,7 +1241,9 @@ class FloatingRecorderBoard(QWidget):
             return
         self._ui_hidden_for_rec = False
         try:
-            self.preview_timer.start(500)
+            import sys as _sys
+
+            self.preview_timer.start(750 if _sys.platform == "darwin" else 500)
         except Exception:
             pass
         try:

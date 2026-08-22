@@ -1,7 +1,8 @@
-"""Bottom-right floating robot assistant with hover quick-launch menu."""
+"""Draggable floating robot assistant with hover quick-launch menu."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QPoint, Qt, QTimer, QSize
@@ -29,8 +30,13 @@ def robot_icon_path() -> Path:
     return bundle_root() / "logo.png"
 
 
+def default_float_assistant_enabled() -> bool:
+    # macOS users complained about logo stuck on screen — default off there
+    return sys.platform != "darwin"
+
+
 class FloatingAssistant(QWidget):
-    """Desktop robot logo (bottom-right). Hover shows tool shortcuts."""
+    """Desktop robot logo (draggable; remembers position). Hover shows tool shortcuts."""
 
     def __init__(self, host, parent=None):
         super().__init__(parent)
@@ -46,6 +52,7 @@ class FloatingAssistant(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFixedSize(78, 78)
+        self.setToolTip("可拖动到任意位置 · 双击打开主界面 · 悬停显示快捷菜单")
 
         # Pure transparent — no circle, no white plate
         self.icon_lbl = QLabel(self)
@@ -136,16 +143,61 @@ class FloatingAssistant(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._maybe_hide_menu)
 
-        self._place_bottom_right()
+        self._restore_or_place()
         self.show()
+
+    def _prefs(self) -> dict:
+        try:
+            return self.host.store.state.setdefault("prefs", {})
+        except Exception:
+            return {}
+
+    def _clamp_to_screens(self, x: int, y: int) -> QPoint:
+        """Keep logo on a visible screen (multi-monitor / resolution change)."""
+        screens = QGuiApplication.screens() or []
+        pt = QPoint(x, y)
+        for scr in screens:
+            g = scr.availableGeometry()
+            if g.adjusted(-20, -20, 20, 20).contains(pt):
+                nx = max(g.left() + 4, min(x, g.right() - self.width() - 4))
+                ny = max(g.top() + 4, min(y, g.bottom() - self.height() - 4))
+                return QPoint(nx, ny)
+        scr = QGuiApplication.primaryScreen()
+        if not scr:
+            return QPoint(x, y)
+        g = scr.availableGeometry()
+        return QPoint(
+            max(g.left() + 4, min(x, g.right() - self.width() - 4)),
+            max(g.top() + 4, min(y, g.bottom() - self.height() - 4)),
+        )
 
     def _place_bottom_right(self) -> None:
         scr = QGuiApplication.primaryScreen()
         if not scr:
             return
         g = scr.availableGeometry()
-        # user: 桌面右下角
         self.move(g.right() - self.width() - 18, g.bottom() - self.height() - 18)
+
+    def _restore_or_place(self) -> None:
+        """Use last dragged position if saved; otherwise default corner once."""
+        prefs = self._prefs()
+        pos = prefs.get("float_assistant_pos")
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            try:
+                p = self._clamp_to_screens(int(pos[0]), int(pos[1]))
+                self.move(p)
+                return
+            except Exception:
+                pass
+        self._place_bottom_right()
+
+    def _save_pos(self) -> None:
+        try:
+            prefs = self._prefs()
+            prefs["float_assistant_pos"] = [int(self.x()), int(self.y())]
+            self.host.store.save_state()
+        except Exception:
+            pass
 
     def _position_menu(self) -> None:
         self.menu.adjustSize()
@@ -199,6 +251,11 @@ class FloatingAssistant(QWidget):
                 self._position_menu()
 
     def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if self._drag:
+            # Snap into visible area and remember
+            p = self._clamp_to_screens(self.x(), self.y())
+            self.move(p)
+            self._save_pos()
         self._drag = False
 
     def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:

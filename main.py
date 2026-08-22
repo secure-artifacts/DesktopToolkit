@@ -127,7 +127,13 @@ class ToolkitApp(QObject):
         return
 
     def _init_assistant(self) -> None:
-        if not self._prefs().get("float_assistant", True):
+        try:
+            from float_assistant import default_float_assistant_enabled
+
+            float_default = default_float_assistant_enabled()
+        except Exception:
+            float_default = True
+        if not self._prefs().get("float_assistant", float_default):
             return
         try:
             self.assistant = FloatingAssistant(self)
