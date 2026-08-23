@@ -457,24 +457,30 @@ class DownloadQueueManager(threading.Thread):
                     self._notify()
                     return
                 if len(found) > 1 or (len(found) == 1 and found[0] != job.url):
-                    # Expand into child download jobs (no further expand)
+                    # Expand into child jobs. HTML category pages still need expand;
+                    # direct audio CDN links download immediately.
                     added = 0
                     with self._lock:
                         existing = {j.url for j in self.jobs if j.status not in {"done", "error", "skipped"}}
                         for u in found:
                             if u in existing:
                                 continue
+                            leaf = u.split("/")[-1][:60]
+                            is_audio = self._is_direct_audio(u)
                             child = JobItem(
                                 id=_uid(),
                                 url=u,
-                                title=u.split("/")[-1][:60],
+                                title=leaf,
                                 status="pending",
-                                message="等待下载…",
+                                message="等待下载…" if is_audio else "等待扫描展开…",
                             )
                             self.jobs.append(child)
                             if not hasattr(self, "_expand_flags"):
                                 self._expand_flags = {}
-                            self._expand_flags[child.id] = False
+                            # Recital catalog → category HTML needs a second expand pass
+                            self._expand_flags[child.id] = (not is_audio) and u.lower().split("?", 1)[0].endswith(
+                                (".html", ".htm")
+                            )
                             existing.add(u)
                             added += 1
                         job.status = "done"

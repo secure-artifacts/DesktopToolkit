@@ -247,37 +247,156 @@ class LyricsEngine(QObject):
             self.lyric_changed.emit(curr_text, next_text)
 
 
+def _parse_gospel_ajax(html: str) -> tuple[str, str] | None:
+    """Extract WordPress admin-ajax URL + security nonce from page HTML."""
+    m = re.search(
+        r"gospelAjax\s*=\s*\{[^}]*\"ajaxurl\"\s*:\s*\"([^\"]+)\"[^}]*\"security\"\s*:\s*\"([^\"]+)\"",
+        html,
+        re.I | re.S,
+    )
+    if not m:
+        m = re.search(
+            r"gospelAjax\s*=\s*\{[^}]*\"security\"\s*:\s*\"([^\"]+)\"[^}]*\"ajaxurl\"\s*:\s*\"([^\"]+)\"",
+            html,
+            re.I | re.S,
+        )
+        if m:
+            return m.group(2).replace("\\/", "/"), m.group(1)
+        return None
+    return m.group(1).replace("\\/", "/"), m.group(2)
+
+
+def fetch_recital_category_audios(page_url: str) -> list[tuple[str, str]]:
+    """Fetch (title, audio_url) list via gp_home_ajax for a readings/recital category page."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": page_url,
+    }
+    r = requests.get(page_url, headers=headers, timeout=20)
+    r.raise_for_status()
+    r.encoding = r.apparent_encoding
+    html = r.text
+    parsed = _parse_gospel_ajax(html)
+    if not parsed:
+        return []
+    ajaxurl, security = parsed
+    slug = page_url.rstrip("/").split("/")[-1].replace(".html", "")
+    # Prefer explicit slug if present in page
+    mslug = re.search(r'category_slug["\']?\s*[:=]\s*["\']([^"\']+)', html)
+    if mslug:
+        slug = mslug.group(1)
+    data = {
+        "action": "gp_home_ajax",
+        "page_name": "page-recitals",
+        "taxonomy": "category",
+        "page_method": "get_list_category_data",
+        "category_slug": slug,
+        "tab_slug": "all",
+        "page_no": "-1",
+        "security": security,
+    }
+    resp = requests.post(ajaxurl, data=data, headers=headers, timeout=30)
+    resp.raise_for_status()
+    payload = resp.json()
+    items = payload.get("data") or []
+    out: list[tuple[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        audio = str(it.get("audio") or "").strip()
+        if not audio:
+            continue
+        title = str(it.get("title") or it.get("slug") or audio.split("/")[-1]).strip()
+        out.append((title, audio))
+    return out
+
+
+def _is_recital_catalog(url: str, html: str) -> bool:
+    path = urllib.parse.urlparse(url).path.lower()
+    if path.endswith("/recital.html") or path.rstrip("/").endswith("recital"):
+        return True
+    if "page-recitals-list" in html and html.lower().count("readings-") >= 5:
+        return True
+    return False
+
+
+def _is_recital_category_page(url: str, html: str) -> bool:
+    path = urllib.parse.urlparse(url).path.lower()
+    if re.search(r"/(readings?|recital|audio)-.+\.html$", path):
+        if _parse_gospel_ajax(html):
+            return True
+    if "get_list_category_data" in html or "page-recitals" in html:
+        if _parse_gospel_ajax(html) and "category_slug" in html:
+            return True
+    return bool(_parse_gospel_ajax(html) and re.search(r"readings?-|recital-", path))
+
+
 def scan_page_for_songs(url: str) -> list[str]:
-    """Scan a webpage and extract all same-domain HTML links matching the song pattern (shxg\\d+)."""
+    """Scan a webpage and extract downloadable song/audio targets.
+
+    Supports:
+      - classic Gmedia song pages (path contains shxg\\d+)
+      - hidden-advent recital catalog → category HTML pages
+      - recital category pages → direct .m4a/.mp3 CDN URLs (via admin-ajax)
+      - pages that already embed direct audio links
+    """
     try:
         parsed_url = urllib.parse.urlparse(url)
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        r = requests.get(url, headers=headers, timeout=10)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        # Direct file URL
+        if any(parsed_url.path.lower().endswith(ext) for ext in (".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac")):
+            return [url]
+
+        r = requests.get(url, headers=headers, timeout=20)
         r.raise_for_status()
         r.encoding = r.apparent_encoding
         html = r.text
-        
-        # Match all href links
-        hrefs = re.findall(r'href=["\'](.*?)["\']', html)
-        song_urls = set()
-        
-        # Check if the URL itself is a song page
+
+        # Classic single Gmedia song page
         if re.search(r"shxg\d+", parsed_url.path):
             return [url]
-            
+
+        # Recital category: expand to CDN audio URLs
+        if _is_recital_category_page(url, html):
+            try:
+                pairs = fetch_recital_category_audios(url)
+                if pairs:
+                    return [audio for _title, audio in pairs]
+            except Exception as e:
+                print(f"recital category ajax failed: {e}", flush=True)
+
+        song_urls: set[str] = set()
+
+        # Direct audio URLs embedded in HTML/JS
+        for m in re.findall(r"https?://[^\s\"'<>]+\.(?:mp3|m4a|wav|ogg|flac|aac)", html, re.I):
+            song_urls.add(m.split("#")[0])
+
+        # Recital catalog: collect category pages for further expansion
+        if _is_recital_catalog(url, html):
+            hrefs = re.findall(r'href=["\'](.*?)["\']', html)
+            for href in hrefs:
+                abs_url = urllib.parse.urljoin(url, href)
+                p = urllib.parse.urlparse(abs_url)
+                if p.netloc and p.netloc != parsed_url.netloc:
+                    continue
+                path = p.path.lower()
+                if re.search(r"/(readings?|recital|audio)-.+\.html$", path) or re.search(
+                    r"/(readings?|recital).+\.html$", path
+                ):
+                    if "recital.html" not in path:
+                        song_urls.add(abs_url.split("#")[0])
+
+        # Classic Gmedia song links
+        hrefs = re.findall(r'href=["\'](.*?)["\']', html)
         for href in hrefs:
             abs_url = urllib.parse.urljoin(url, href)
             parsed_abs = urllib.parse.urlparse(abs_url)
-            
-            # Must be same domain
             if parsed_abs.netloc != parsed_url.netloc:
                 continue
-                
-            # Must contain the Gmedia song ID pattern (shxg followed by digits)
             if re.search(r"shxg\d+", parsed_abs.path):
-                song_urls.add(abs_url)
-                
-        return sorted(list(song_urls))
+                song_urls.add(abs_url.split("#")[0])
+
+        return sorted(song_urls)
     except Exception as e:
         print(f"Error scanning page for songs: {e}")
         return []
@@ -334,6 +453,27 @@ def download_media(
             print(f"Skipping {title} (already exists)", flush=True)
             return existing_audio, lrc_dest
 
+        # Direct CDN / file URL (recital AJAX expands to these)
+        if any(parsed_url.path.lower().endswith(ext) for ext in (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac")):
+            ext = Path(parsed_url.path).suffix.lower() or ".m4a"
+            stem = title
+            # Avoid title.m4a.m4a when base/title already includes extension
+            if stem.lower().endswith(ext):
+                stem = stem[: -len(ext)]
+            stem = re.sub(r'[\\/*?:"<>|]', "", stem).strip() or "track"
+            audio_dest = output_dir / f"{stem}{ext}"
+            if audio_dest.exists() and audio_dest.stat().st_size > 1000:
+                return audio_dest, (lrc_dest if lrc_exists else None)
+            ok = download_file_resumable(
+                url,
+                audio_dest,
+                headers=headers,
+                pause_check=pause_check,
+                progress_cb=progress_cb,
+                timeout=60,
+            )
+            return (audio_dest if ok else None), (lrc_dest if lrc_exists else None)
+
         origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
         lrc_url = f"{origin}/wp-content/grand-media/lrc/{base}.lrc"
         m4a_url = f"{origin}/wp-content/grand-media/audio/{base}.m4a"
@@ -372,18 +512,32 @@ def download_media(
                 audio_success = True
                 break
 
-        if not audio_success and any(
-            parsed_url.path.lower().endswith(ext) for ext in (".mp3", ".wav", ".m4a", ".ogg")
-        ):
-            audio_dest = output_dir / last_seg
-            audio_success = download_file_resumable(
-                url,
-                audio_dest,
-                headers=headers,
-                pause_check=pause_check,
-                progress_cb=progress_cb,
-                timeout=30,
-            )
+        # Fallback: page may expose a direct audio URL in HTML / AJAX category
+        if not audio_success:
+            try:
+                pairs = fetch_recital_category_audios(url)
+                for title2, audio_url in pairs:
+                    if pause_check and pause_check():
+                        return None, (lrc_dest if lrc_success else None)
+                    safe = re.sub(r'[\\/*?:"<>|]', "", title2).strip() or "track"
+                    ext = Path(urllib.parse.urlparse(audio_url).path).suffix.lower() or ".m4a"
+                    dest = output_dir / f"{safe}{ext}"
+                    ok = download_file_resumable(
+                        audio_url,
+                        dest,
+                        headers=headers,
+                        pause_check=pause_check,
+                        progress_cb=progress_cb,
+                        timeout=60,
+                    )
+                    if ok:
+                        # For a category page opened as a single job, download first track only
+                        # (expansion path downloads all). Keep first success as return.
+                        audio_dest = dest
+                        audio_success = True
+                        break
+            except Exception as e:
+                print(f"recital fallback failed: {e}", flush=True)
 
         return (audio_dest if audio_success else None), (lrc_dest if lrc_success else None)
     except Exception as e:

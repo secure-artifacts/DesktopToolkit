@@ -87,6 +87,22 @@ class RecordingDrawOverlay(QWidget):
         self.track_timer.timeout.connect(self._track_region)
         # 250ms is enough to follow moving windows; 100ms burned CPU while drawing
         self.track_timer.start(250)
+        # After winId exists, exclude this overlay from OS screen capture (strokes
+        # are composited in software via overlay_rgba — avoids green/gray veil in video).
+        QTimer.singleShot(0, self._exclude_from_capture)
+
+    def _exclude_from_capture(self) -> None:
+        """Windows 10 2004+: do not include this HWND in mss/DXGI screen capture."""
+        if not HAS_WIN32:
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            WDA_EXCLUDEFROMCAPTURE = 0x00000011
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        except Exception:
+            pass
 
     def _make_pen_cursor(self) -> None:
         from PyQt6.QtGui import QCursor, QPixmap, QPainterPath
@@ -163,6 +179,7 @@ class RecordingDrawOverlay(QWidget):
             self.activateWindow()
             self.setFocus(Qt.FocusReason.OtherFocusReason)
             self._force_topmost_clickable()
+            self._exclude_from_capture()
             self.update()
         else:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -183,9 +200,9 @@ class RecordingDrawOverlay(QWidget):
         )
         if not need:
             return
-        # Non-premultiplied ARGB is more predictable for stroke alpha
-        new_img = QImage(w, h, QImage.Format.Format_ARGB32)
-        new_img.fill(Qt.GlobalColor.transparent)
+        # Explicit transparent canvas (avoid premultiplied gray/green fringes)
+        new_img = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+        new_img.fill(0)  # fully transparent
         if self.canvas_image is not None and not self.canvas_image.isNull():
             p = QPainter(new_img)
             p.drawImage(0, 0, self.canvas_image)
@@ -407,6 +424,20 @@ class RecordingControlBar(QWidget):
         self.btn_brush.setToolTip("再点一次关闭画笔")
         self.btn_brush.clicked.connect(self._sync_brush)
         lay.addWidget(self.btn_brush)
+        self.cmb_brush = QComboBox()
+        self.cmb_brush.addItems(["红色", "绿色", "黄色", "蓝色", "白色"])
+        self.cmb_brush.setToolTip("画笔颜色（录制中可切换）")
+        self.cmb_brush.setMinimumWidth(72)
+        try:
+            # Keep in sync with settings panel default
+            cur = board.cmb_brush.currentText()
+            idx = self.cmb_brush.findText(cur)
+            if idx >= 0:
+                self.cmb_brush.setCurrentIndex(idx)
+        except Exception:
+            pass
+        self.cmb_brush.currentIndexChanged.connect(self._sync_brush_color)
+        lay.addWidget(self.cmb_brush)
         self.btn_clear = QPushButton("清除笔画", objectName="soft")
         self.btn_clear.setToolTip("清除屏幕上已画内容（不取消录制）")
         self.btn_clear.clicked.connect(self._clear_strokes)
@@ -419,12 +450,42 @@ class RecordingControlBar(QWidget):
         lay.addWidget(self.btn_stop)
         root.addWidget(bar)
         self.adjustSize()
+        QTimer.singleShot(0, self._exclude_from_capture)
+
+    def _exclude_from_capture(self) -> None:
+        """Keep floating toolbar out of the recorded video (Windows)."""
+        if not HAS_WIN32:
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            WDA_EXCLUDEFROMCAPTURE = 0x00000011
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        except Exception:
+            pass
 
     def _sync_brush(self) -> None:
         on = self.btn_brush.isChecked()
         self.board.btn_brush.setChecked(on)
         self.board._toggle_brush()
         self.btn_brush.setText("画笔关" if on else "画笔开")
+        self._sync_brush_color()
+
+    def _sync_brush_color(self) -> None:
+        """Apply color from floating bar (works while settings panel is hidden)."""
+        try:
+            name = self.cmb_brush.currentText()
+            # Sync settings combo without re-entry loops
+            if hasattr(self.board, "cmb_brush"):
+                self.board.cmb_brush.blockSignals(True)
+                idx = self.board.cmb_brush.findText(name)
+                if idx >= 0:
+                    self.board.cmb_brush.setCurrentIndex(idx)
+                self.board.cmb_brush.blockSignals(False)
+            self.board._change_brush_color()
+        except Exception:
+            pass
 
     def _clear_strokes(self) -> None:
         self.board._clear_brush()
@@ -438,14 +499,42 @@ class RecordingControlBar(QWidget):
         self.btn_pause.setText("继续" if paused else "暂停")
         self.show()
         self.raise_()
-        # bottom center of primary screen
+        self._exclude_from_capture()
+        # Place control bar near bottom — prefer just below capture region when possible
         from PyQt6.QtGui import QGuiApplication
 
         scr = QGuiApplication.primaryScreen()
         if scr:
             g = scr.availableGeometry()
             self.adjustSize()
-            self.move(g.center().x() - self.width() // 2, g.bottom() - self.height() - 24)
+            x = g.center().x() - self.width() // 2
+            y = g.bottom() - self.height() - 24
+            try:
+                # If we know capture region, put bar outside it (below) so even
+                # without ExcludeFromCapture it stays out of the frame.
+                reg = None
+                if self.board.overlay and self.board.overlay.target_region:
+                    reg = self.board.overlay.target_region
+                elif self.board.recorder:
+                    reg = screen_recorder.resolve_region(getattr(self.board.recorder.cfg, "target", None))
+                if reg:
+                    rx = int(reg.get("left") or 0)
+                    ry = int(reg.get("top") or 0)
+                    rw = int(reg.get("width") or 0)
+                    rh = int(reg.get("height") or 0)
+                    # Center under the capture rect if space allows
+                    x = rx + max(0, (rw - self.width()) // 2)
+                    below = ry + rh + 8
+                    if below + self.height() <= g.bottom() - 4:
+                        y = below
+                    else:
+                        # Above capture region
+                        above = ry - self.height() - 8
+                        if above >= g.top() + 4:
+                            y = above
+            except Exception:
+                pass
+            self.move(x, y)
 
 
 class FloatingRecorderBoard(QWidget):
