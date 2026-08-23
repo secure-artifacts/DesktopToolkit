@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 import traceback
@@ -25,9 +26,15 @@ from voice import SubtitleToast, VoiceService
 
 
 def _install_exception_hooks() -> Path:
-    log_path = Path(__file__).resolve().parent / "DesktopToolkit-error.log"
     if getattr(sys, "frozen", False):
-        log_path = Path(sys.executable).resolve().parent / "DesktopToolkit-error.log"
+        data_root = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
+        try:
+            data_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            data_root = Path.home()
+        log_path = data_root / "DesktopToolkit-error.log"
+    else:
+        log_path = Path(__file__).resolve().parent / "DesktopToolkit-error.log"
 
     def _write(msg: str) -> None:
         try:

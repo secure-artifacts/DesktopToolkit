@@ -1313,11 +1313,12 @@ class LyricsDashboard(QWidget):
         path = Path(audio_path) if audio_path else None
         if path is None:
             return
-        # Autoplay if nothing is currently playing
+        # Download completion can happen during app startup.  Do not turn it
+        # into playback; the user must explicitly choose Play/double-click.
         if self.current_song_idx == -1 and len(self.playlist) > 0:
             for i, p in enumerate(self.playlist):
                 if p.name == path.name:
-                    self._play_index(i)
+                    self.list_songs.setCurrentRow(i)
                     break
             
     def _on_song_double_clicked(self, item: QListWidgetItem) -> None:
