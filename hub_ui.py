@@ -143,8 +143,8 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         outer.addWidget(self.stack, 1)
 
-        self._page_keys: list[str] = []
-        for key, builder in (
+        self._page_builders = dict(
+            (
             ("home", self._page_home),
             ("shot", self._page_shot),
             ("record", self._page_record),
@@ -152,9 +152,19 @@ class MainWindow(QMainWindow):
             ("transfer", self._page_transfer),
             ("clean", self._page_clean),
             ("prefs", self._page_prefs),
-        ):
+            )
+        )
+        self._page_keys: list[str] = []
+        self._loaded_pages: set[str] = set()
+        for key, builder in self._page_builders.items():
             self._page_keys.append(key)
-            self.stack.addWidget(builder())
+            # Home and preferences are needed by startup services. Expensive media,
+            # recorder and transfer widgets are created only when first opened.
+            if key in {"home", "prefs"}:
+                self.stack.addWidget(builder())
+                self._loaded_pages.add(key)
+            else:
+                self.stack.addWidget(QWidget())
 
         self.apply_theme()
         self.goto("home")
@@ -179,7 +189,19 @@ class MainWindow(QMainWindow):
             if hasattr(self, "btn_nav_p2p"):
                 self.btn_nav_p2p.setChecked(False)
         if key in self._page_keys:
+            self._ensure_page(key)
             self.stack.setCurrentIndex(self._page_keys.index(key))
+
+    def _ensure_page(self, key: str) -> None:
+        if key in self._loaded_pages or key not in self._page_builders:
+            return
+        index = self._page_keys.index(key)
+        placeholder = self.stack.widget(index)
+        page = self._page_builders[key]()
+        self.stack.removeWidget(placeholder)
+        placeholder.deleteLater()
+        self.stack.insertWidget(index, page)
+        self._loaded_pages.add(key)
 
     def _home_card(self, icon: str, text: str, cb) -> QPushButton:
         b = QPushButton(f"  {text}")
@@ -231,6 +253,7 @@ class MainWindow(QMainWindow):
                 [
                     ("todos", "待办事项", self.host.show_todos),
                     ("notes", "便签", self.host.show_notes),
+                    ("notebook", "笔记本", self.host.show_notebook),
                     ("pomodoro", "番茄钟", self.host.show_pomodoro),
                     ("alarm", "闹钟", self.host.show_alarm_board),
                 ],

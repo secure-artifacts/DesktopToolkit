@@ -71,6 +71,7 @@ class ToolkitApp(QObject):
         self.alarm_board = None
         self.todo_board = None
         self.notes_ctl = None
+        self.notebook_win = None
         self.pomo_board = None
         self.lyrics_dashboard = None
         self.lyrics_engine = None
@@ -177,6 +178,7 @@ class ToolkitApp(QObject):
             ("局域网共享", self.show_lan_share),
             ("待办", self.show_todos),
             ("便签", self.show_notes),
+            ("笔记本", self.show_notebook),
             ("清理电脑", self.start_deep_clean),
             ("音乐", self.show_music_player),
         ):
@@ -424,6 +426,12 @@ class ToolkitApp(QObject):
             self.notes_ctl = NotesController(self.store.state, self.store.save_state)
         self.notes_ctl.show_all()
 
+    def show_notebook(self) -> None:
+        """Open the full notebook, independent from desktop sticky notes."""
+        from notebook_ui import show_notebook_window
+
+        show_notebook_window(self, app_name="DesktopToolkit")
+
     def add_note(self) -> None:
         from simple_boards import NotesController
 
@@ -519,6 +527,8 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(logo)))
     try:
         ToolkitApp(app)
+        if "--smoke-test" in sys.argv:
+            QTimer.singleShot(3000, app.quit)
     except Exception as exc:
         traceback.print_exc()
         QMessageBox.critical(None, "Desktop Toolkit", f"启动失败：{exc}")
