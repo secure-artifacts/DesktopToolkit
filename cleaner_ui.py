@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES
+from cleaner import ALL_CLEAN_SCOPES, CLEAN_SCOPES, DEFAULT_SCOPES, DEEP_SCOPES, DEEP_SCOPE_IDS
 
 
 class _CleanBridge(QObject):
@@ -59,8 +59,15 @@ class FloatingCleanerBoard(QWidget):
             background: #6366f1; color: white; font-weight: 800;
         }
         QPushButton#soft {
-            background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+            background: #1e293b; color: #e2e8f0; border: 1px solid #475569;
+            border-radius: 8px; padding: 8px 14px; font-weight: 700;
         }
+        QPushButton#soft:hover { background: #334155; border-color: #64748b; }
+        QPushButton#ghost {
+            background: #1e293b; color: #e2e8f0; border: 1px solid #475569;
+            border-radius: 8px; padding: 8px 14px; font-weight: 700;
+        }
+        QPushButton#ghost:hover { background: #334155; color: #fff; border-color: #818cf8; }
         QPushButton#navBtn {
             background: transparent; border: none; border-radius: 10px;
             color: #94a3b8; text-align: left; padding: 10px 10px;
@@ -191,11 +198,17 @@ class FloatingCleanerBoard(QWidget):
         self.lbl_status = QLabel("选择清理范围后点「开始清理」。")
         self.lbl_status.setObjectName("muted")
         self.lbl_status.setWordWrap(True)
+        self.btn_deep = QPushButton("深度清理")
+        self.btn_deep.setObjectName("soft")
+        self.btn_deep.setMinimumHeight(36)
+        self.btn_deep.setToolTip("勾选全部常规项 + 深度项（错误报告/崩溃转储/GPU缓存等），更彻底")
+        self.btn_deep.clicked.connect(self._start_deep)
         self.btn_run = QPushButton("开始清理")
         self.btn_run.setObjectName("primary")
         self.btn_run.setMinimumHeight(36)
         self.btn_run.clicked.connect(self._start)
         bottom.addWidget(self.lbl_status, 1)
+        bottom.addWidget(self.btn_deep)
         bottom.addWidget(self.btn_run)
         body.addLayout(bottom)
 
@@ -265,12 +278,42 @@ class FloatingCleanerBoard(QWidget):
             d.setWordWrap(True)
             lay.addWidget(d)
 
+        if DEEP_SCOPES:
+            deep_title = QLabel("深度清理项（更彻底，请谨慎）")
+            deep_title.setObjectName("section")
+            lay.addWidget(deep_title)
+            deep_tip = QLabel("错误报告、崩溃转储、GPU 缓存、聊天软件缓存等。点底部「深度清理」会全选这些项。")
+            deep_tip.setObjectName("muted")
+            deep_tip.setWordWrap(True)
+            lay.addWidget(deep_tip)
+            for sid, label, desc in DEEP_SCOPES:
+                box = QCheckBox(f"{label}")
+                box.setChecked(sid in saved)
+                box.setToolTip(desc)
+                box.setMinimumHeight(28)
+                box.stateChanged.connect(self._persist_scopes)
+                self._scope_checks[sid] = box
+                lay.addWidget(box)
+                d = QLabel(f"  {desc}")
+                d.setObjectName("muted")
+                d.setWordWrap(True)
+                lay.addWidget(d)
+
         row = QHBoxLayout()
-        all_btn = QPushButton("全选")
-        all_btn.setObjectName("ghost")
+        row.setSpacing(10)
+        all_btn = QPushButton("全部勾选")
+        all_btn.setObjectName("soft")
+        all_btn.setMinimumHeight(34)
+        all_btn.setMinimumWidth(100)
+        all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        all_btn.setToolTip("勾选上面所有清理范围")
         all_btn.clicked.connect(lambda: self._set_all_scopes(True))
-        none_btn = QPushButton("全不选")
-        none_btn.setObjectName("ghost")
+        none_btn = QPushButton("全部取消")
+        none_btn.setObjectName("soft")
+        none_btn.setMinimumHeight(34)
+        none_btn.setMinimumWidth(100)
+        none_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        none_btn.setToolTip("取消勾选全部清理范围")
         none_btn.clicked.connect(lambda: self._set_all_scopes(False))
         row.addWidget(all_btn)
         row.addWidget(none_btn)
@@ -366,18 +409,61 @@ class FloatingCleanerBoard(QWidget):
             return
         self._busy = True
         self.btn_run.setEnabled(False)
+        self.btn_deep.setEnabled(False)
         self.lbl_status.setText("正在清理，请稍候…")
         try:
             self.on_start_clean(scopes)
         except Exception as exc:
             self._busy = False
             self.btn_run.setEnabled(True)
+            self.btn_deep.setEnabled(True)
+            self.lbl_status.setText(f"启动失败：{exc}")
+
+    def _start_deep(self) -> None:
+        """Select all normal + deep scopes, confirm, then clean."""
+        if self._busy:
+            self.lbl_status.setText("正在清理中，请稍候…")
+            return
+        from PyQt6.QtWidgets import QMessageBox
+
+        if (
+            QMessageBox.question(
+                self,
+                "深度清理",
+                "将清理全部常规项，并额外清理：\n"
+                "错误报告、崩溃转储、GPU 着色器缓存、最近使用记录、聊天软件缓存、日志。\n\n"
+                "不会删除你的文档/照片。被占用的文件会自动跳过。\n确定继续？",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        # Check all scopes in UI
+        for sid, box in self._scope_checks.items():
+            box.blockSignals(True)
+            box.setChecked(True)
+            box.blockSignals(False)
+        self._persist_scopes()
+        scopes = list(DEFAULT_SCOPES) + list(DEEP_SCOPE_IDS)
+        self._busy = True
+        self.btn_run.setEnabled(False)
+        self.btn_deep.setEnabled(False)
+        self.lbl_status.setText("正在深度清理，请稍候…")
+        try:
+            self.on_start_clean(scopes)
+        except Exception as exc:
+            self._busy = False
+            self.btn_run.setEnabled(True)
+            self.btn_deep.setEnabled(True)
             self.lbl_status.setText(f"启动失败：{exc}")
 
     def on_clean_result(self, summary: str, *, details: str = "") -> None:
         """Call from main thread when clean finishes."""
         self._busy = False
         self.btn_run.setEnabled(True)
+        try:
+            self.btn_deep.setEnabled(True)
+        except Exception:
+            pass
         self.lbl_status.setText(summary)
         cfg = self._clean_cfg()
         if cfg.get("keep_log", True):

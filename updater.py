@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Bump when shipping a new installer.
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.5.0"
+
 # Public releases channel (organization repo — no personal account)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -37,15 +38,6 @@ def _normalize_version(text: str) -> tuple[int, ...]:
     while len(nums) < 3:
         nums.append(0)
     return tuple(nums[:4])
-
-
-def _asset_version_rank(name: str, latest: str) -> int:
-    """Prefer assets whose filename explicitly matches the release version."""
-    versions = re.findall(r"(?<!\d)v?(\d+(?:[._-]\d+){1,3})(?!\d)", name or "", re.IGNORECASE)
-    if not versions:
-        return 1
-    wanted = _normalize_version(latest)
-    return 0 if any(_normalize_version(v.replace("_", ".").replace("-", ".")) == wanted for v in versions) else 2
 
 
 def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
@@ -75,25 +67,24 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
     # Prefer setup.exe, then portable zip, then any asset
     download = ""
     asset_name = ""
-    candidates: list[tuple[int, int, str, str]] = []
+    candidates: list[tuple[int, str, str]] = []
     for asset in payload.get("assets") or []:
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
         if not url:
             continue
         low = name.lower()
-        version_rank = _asset_version_rank(name, latest)
         if "setup" in low and low.endswith(".exe"):
-            candidates.append((0, version_rank, url, name))
+            candidates.append((0, url, name))
         elif low.endswith(".exe"):
-            candidates.append((1, version_rank, url, name))
+            candidates.append((1, url, name))
         elif "portable" in low and low.endswith(".zip"):
-            candidates.append((2, version_rank, url, name))
+            candidates.append((2, url, name))
         elif low.endswith(".zip") or low.endswith(".7z"):
-            candidates.append((3, version_rank, url, name))
+            candidates.append((3, url, name))
     if candidates:
-        candidates.sort(key=lambda x: (x[0], x[1]))
-        download, asset_name = candidates[0][2], candidates[0][3]
+        candidates.sort(key=lambda x: x[0])
+        download, asset_name = candidates[0][1], candidates[0][2]
 
     if not latest:
         return UpdateCheckResult(

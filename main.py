@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import threading
 import traceback
@@ -26,15 +25,9 @@ from voice import SubtitleToast, VoiceService
 
 
 def _install_exception_hooks() -> Path:
+    log_path = Path(__file__).resolve().parent / "DesktopToolkit-error.log"
     if getattr(sys, "frozen", False):
-        data_root = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DesktopToolkit"
-        try:
-            data_root.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            data_root = Path.home()
-        log_path = data_root / "DesktopToolkit-error.log"
-    else:
-        log_path = Path(__file__).resolve().parent / "DesktopToolkit-error.log"
+        log_path = Path(sys.executable).resolve().parent / "DesktopToolkit-error.log"
 
     def _write(msg: str) -> None:
         try:
@@ -55,6 +48,7 @@ def _install_exception_hooks() -> Path:
 
 class ToolkitApp(QObject):
     clean_finished = pyqtSignal(object)
+    weather_ready = pyqtSignal(str)  # marshal worker result → UI thread
 
     def __init__(self, app: QApplication) -> None:
         super().__init__(app)
@@ -72,6 +66,7 @@ class ToolkitApp(QObject):
         self.todo_board = None
         self.notes_ctl = None
         self.notebook_win = None
+        self.file_organizer_win = None
         self.pomo_board = None
         self.lyrics_dashboard = None
         self.lyrics_engine = None
@@ -96,6 +91,7 @@ class ToolkitApp(QObject):
             full_combo=str(sc.get("hotkey_full") or "Ctrl+Alt+Shift+A"),
         )
         self.clean_finished.connect(self._on_clean_finished)
+        self.weather_ready.connect(self._on_weather_ready)
         self.alarm_timer = QTimer(self)
         self.alarm_timer.timeout.connect(self._alarm_tick)
         self.alarm_timer.start(1000)
@@ -179,6 +175,7 @@ class ToolkitApp(QObject):
             ("待办", self.show_todos),
             ("便签", self.show_notes),
             ("笔记本", self.show_notebook),
+            ("文件整理", self.show_file_organizer),
             ("清理电脑", self.start_deep_clean),
             ("音乐", self.show_music_player),
         ):
@@ -200,11 +197,46 @@ class ToolkitApp(QObject):
             self.show_hub()
 
     def show_hub(self) -> None:
-        if self.main_win is None:
-            self.main_win = MainWindow(self)
-        self.main_win.show()
-        self.main_win.raise_()
-        self.main_win.activateWindow()
+        """Open / restore the main window in front of floating tools."""
+        try:
+            if self.main_win is None:
+                self.main_win = MainWindow(self)
+            # Closed-with-X only hides; recreate if the C++ object was destroyed
+            try:
+                _ = self.main_win.isVisible()
+            except RuntimeError:
+                self.main_win = MainWindow(self)
+            w = self.main_win
+            if w.isMinimized():
+                w.showNormal()
+            # Clamp on-screen in case geometry was saved off-monitor
+            try:
+                from PyQt6.QtGui import QGuiApplication
+
+                scr = QGuiApplication.primaryScreen()
+                if scr:
+                    g = scr.availableGeometry()
+                    if not g.intersects(w.frameGeometry()):
+                        w.move(g.center().x() - w.width() // 2, g.center().y() - w.height() // 2)
+            except Exception:
+                pass
+            w.show()
+            w.raise_()
+            w.activateWindow()
+            # Windows: Tool-type float windows can steal z-order; force foreground
+            try:
+                if sys.platform == "win32":
+                    import ctypes
+
+                    hwnd = int(w.winId())
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.announce(f"打开主界面失败：{e}", force_voice=False)
+            except Exception:
+                pass
 
     def start_screenshot_region(self) -> None:
         from screenshot_app import start_screenshot
@@ -274,7 +306,10 @@ class ToolkitApp(QObject):
     def announce_weather(self, *, force: bool = False) -> None:
         """Fetch local weather and announce (subtitle + optional voice)."""
         if self._weather_busy:
-            return
+            # Allow force retry to clear a stuck busy flag from a hung prior request
+            if not force:
+                return
+            self._weather_busy = False
         cfg = dict(self.store.state.setdefault("weather", {}))
         if not force and not cfg.get("enabled"):
             return
@@ -287,13 +322,14 @@ class ToolkitApp(QObject):
 
                 report = fetch_weather(cfg)
                 msg = report.speak_text()
-                # Persist last resolved coords for convenience
+                # Persist last resolved coords for convenience.
+                # Do NOT write display labels into location_text — that poisoned
+                # auto mode (geocode of "City · Region · Country" always failed).
                 try:
                     w = self.store.state.setdefault("weather", {})
                     w["latitude"] = f"{report.latitude:.5f}"
                     w["longitude"] = f"{report.longitude:.5f}"
-                    if report.place and not str(w.get("location_text") or "").strip():
-                        w["location_text"] = report.place
+                    w["last_place"] = report.place
                     self.store.save_state()
                 except Exception:
                     pass
@@ -301,18 +337,22 @@ class ToolkitApp(QObject):
                 msg = f"天气获取失败：{e}"
             finally:
                 self._weather_busy = False
-            # Back to UI thread via QTimer
-            QTimer.singleShot(0, lambda m=msg: self.announce(m, force_voice=True))
-            try:
-                if self.main_win is not None and hasattr(self.main_win, "lbl_weather_status"):
-                    QTimer.singleShot(
-                        0,
-                        lambda m=msg: self.main_win.lbl_weather_status.setText(m),  # type: ignore[union-attr]
-                    )
-            except Exception:
-                pass
+            # Must use signal — QTimer.singleShot from worker thread often never fires
+            self.weather_ready.emit(msg)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _on_weather_ready(self, msg: str) -> None:
+        """UI-thread handler for weather fetch result."""
+        try:
+            self.announce(msg, force_voice=True)
+        except Exception:
+            pass
+        try:
+            if self.main_win is not None and hasattr(self.main_win, "lbl_weather_status"):
+                self.main_win.lbl_weather_status.setText(msg)  # type: ignore[union-attr]
+        except Exception:
+            pass
 
     def show_recorder_board(self) -> None:
         from recorder_ui import FloatingRecorderBoard
@@ -426,18 +466,24 @@ class ToolkitApp(QObject):
             self.notes_ctl = NotesController(self.store.state, self.store.save_state)
         self.notes_ctl.show_all()
 
-    def show_notebook(self) -> None:
-        """Open the full notebook, independent from desktop sticky notes."""
-        from notebook_ui import show_notebook_window
-
-        show_notebook_window(self, app_name="DesktopToolkit")
-
     def add_note(self) -> None:
         from simple_boards import NotesController
 
         if self.notes_ctl is None:
             self.notes_ctl = NotesController(self.store.state, self.store.save_state)
         self.notes_ctl.add_note()
+
+    def show_notebook(self) -> None:
+        """Open Evernote-style notebook library (independent from sticky notes)."""
+        from notebook_ui import show_notebook_window
+
+        show_notebook_window(self, app_name="DesktopToolkit")
+
+    def show_file_organizer(self) -> None:
+        """Open filename-based file organizer."""
+        from file_organizer_ui import show_file_organizer
+
+        show_file_organizer(self)
 
     def show_alarm_board(self) -> None:
         from alarm_ui import FloatingAlarmBoard
@@ -527,8 +573,6 @@ def main() -> int:
         app.setWindowIcon(QIcon(str(logo)))
     try:
         ToolkitApp(app)
-        if "--smoke-test" in sys.argv:
-            QTimer.singleShot(3000, app.quit)
     except Exception as exc:
         traceback.print_exc()
         QMessageBox.critical(None, "Desktop Toolkit", f"启动失败：{exc}")

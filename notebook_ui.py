@@ -570,10 +570,23 @@ class NotebookWindow(QMainWindow):
         self.btn_highlight.clicked.connect(lambda: self._show_color_palette(True))
         self.toolbar.addWidget(self.btn_highlight)
         self.toolbar.addSeparator()
+        self.toolbar.addWidget(QLabel(" 图宽 "))
+        self.cmb_img_size = QComboBox()
+        self.cmb_img_size.setToolTip("插入/粘贴图片时压缩：最长边像素（减小附件体积）")
+        self.cmb_img_size.setMinimumWidth(88)
+        for edge, label in (
+            (800, "800px"),
+            (1280, "1280px"),
+            (1920, "1920px"),
+            (0, "原图"),
+        ):
+            self.cmb_img_size.addItem(label, edge)
+        self.cmb_img_size.setCurrentIndex(1)  # 1280 default
+        self.toolbar.addWidget(self.cmb_img_size)
         for text, tip, slot in (
             ("🔗", "插入/粘贴超链接", self._insert_link_dialog),
-            ("图片", "从文件插入图片", self._insert_image_file),
-            ("附件", "添加附件文件（PDF/文档等）", self._add_attachment),
+            ("图片", "从文件插入图片（会按「图宽」压缩）", self._insert_image_file),
+            ("附件", "添加附件（图片同样按「图宽」压缩）", self._add_attachment),
         ):
             act = QAction(text, self)
             act.setToolTip(tip)
@@ -829,17 +842,15 @@ class NotebookWindow(QMainWindow):
     def _on_nb_selected(self, cur: QListWidgetItem | None, _prev=None) -> None:
         if cur is None:
             return
-        notebook_id = str(cur.data(Qt.ItemDataRole.UserRole) or "__all__")
         self._flush_save()
-        self._current_notebook_id = notebook_id
+        self._current_notebook_id = str(cur.data(Qt.ItemDataRole.UserRole) or "__all__")
         self.refresh_note_list()
 
     def _on_tag_selected(self, cur: QListWidgetItem | None, _prev=None) -> None:
         if cur is None:
             return
-        tag = cur.data(Qt.ItemDataRole.UserRole)
         self._flush_save()
-        self._current_tag = tag
+        self._current_tag = cur.data(Qt.ItemDataRole.UserRole)
         self.refresh_note_list()
 
     def _on_search(self, _text: str = "") -> None:
@@ -913,10 +924,9 @@ class NotebookWindow(QMainWindow):
     def _flush_save(self) -> None:
         if not self._current_note_id or self._loading:
             return
-        if not self._dirty:
-            self._save_timer.stop()
-            return
-        self._save_timer.stop()
+        if not self._dirty and not self._save_timer.isActive():
+            # still allow forced save
+            pass
         tags = [t.strip() for t in self.txt_tags.text().split(",") if t.strip()]
         active = "markdown" if self.tabs.currentIndex() == 1 else "rich"
         html = self.rich.toHtml()
@@ -932,6 +942,7 @@ class NotebookWindow(QMainWindow):
         self._dirty = False
         self.lbl_status.setText("已保存")
         self.refresh_note_list(keep_selection=True)
+        self.refresh_sidebar()
 
     def _new_note(self) -> None:
         self._flush_save()
@@ -1272,6 +1283,12 @@ class NotebookWindow(QMainWindow):
             c.setPosition(min(pos, len(self.rich.toPlainText())))
             self.rich.setTextCursor(c)
 
+    def _image_max_edge(self) -> int:
+        try:
+            return int(self.cmb_img_size.currentData() or 1280)
+        except Exception:
+            return 1280
+
     def _insert_image_file(self) -> None:
         if not self._current_note_id:
             self._new_note()
@@ -1291,7 +1308,25 @@ class NotebookWindow(QMainWindow):
             self._new_note()
         assert self._current_note_id
         try:
-            att = self.store.add_image_bytes(self._current_note_id, data, name=name or "paste.png")
+            before = len(data)
+            edge = self._image_max_edge()
+            if edge <= 0:
+                # 原图：不缩放，但仍可经 store 路径保存（skip compress by huge edge + png keep)
+                att = self.store.add_image_bytes(
+                    self._current_note_id,
+                    data,
+                    name=name or "paste.png",
+                    max_edge=0,
+                    jpeg_quality=95,
+                )
+            else:
+                att = self.store.add_image_bytes(
+                    self._current_note_id,
+                    data,
+                    name=name or "paste.jpg",
+                    max_edge=edge,
+                    jpeg_quality=85,
+                )
             ap = self.store.attachment_path(self._current_note_id, att)
             url = ap.resolve().as_uri()
             if self.tabs.currentIndex() == 0:
@@ -1302,7 +1337,12 @@ class NotebookWindow(QMainWindow):
             meta, _ = self.store.get_note(self._current_note_id)
             self._refresh_attachments(meta)
             self._mark_dirty()
-            self.lbl_status.setText(f"已插入图片：{att.get('name')}")
+            after = int(att.get("size") or 0)
+            saved = max(0, before - after)
+            self.lbl_status.setText(
+                f"已插入图片：{att.get('name')}  "
+                f"({after // 1024} KB" + (f"，已压缩约 {saved // 1024} KB" if saved > 1024 else "") + ")"
+            )
         except Exception as e:
             QMessageBox.warning(self, "图片失败", str(e))
 
@@ -1313,10 +1353,23 @@ class NotebookWindow(QMainWindow):
         if not path:
             return
         try:
-            att = self.store.add_attachment(self._current_note_id, path)
+            before = Path(path).stat().st_size
+            edge = self._image_max_edge()
+            att = self.store.add_attachment(
+                self._current_note_id,
+                path,
+                compress_images=(edge > 0),
+                max_edge=edge if edge > 0 else 0,
+                jpeg_quality=85,
+            )
             meta, _ = self.store.get_note(self._current_note_id)
             self._refresh_attachments(meta)
-            self.lbl_status.setText(f"已添加附件：{att.get('name')}")
+            after = int(att.get("size") or 0)
+            saved = max(0, before - after)
+            msg = f"已添加附件：{att.get('name')}  ({after // 1024} KB"
+            if saved > 1024:
+                msg += f"，已压缩约 {saved // 1024} KB"
+            self.lbl_status.setText(msg + ")")
         except Exception as e:
             QMessageBox.warning(self, "附件失败", str(e))
 

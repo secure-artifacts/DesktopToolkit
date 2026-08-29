@@ -421,7 +421,78 @@ class NotebookStore:
         return text[:160]
 
     # ---- attachments ----
-    def add_attachment(self, note_id: str, src_path: str | Path, *, display_name: str | None = None) -> dict:
+    @staticmethod
+    def compress_image_bytes(
+        data: bytes,
+        *,
+        max_edge: int = 1280,
+        jpeg_quality: int = 85,
+        source_name: str = "image.jpg",
+    ) -> tuple[bytes, str, str]:
+        """Downscale + JPEG-compress image. Returns (bytes, filename, mime).
+
+        Keeps GIF/animated as original if decode fails. Transparent PNG → RGB on white.
+        """
+        if max_edge == 0:
+            # Explicit "keep original"
+            name = _safe_name(source_name)
+            suf = Path(name).suffix.lower()
+            mime = "application/octet-stream"
+            if suf in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+                mime = f"image/{suf.lstrip('.').replace('jpg', 'jpeg')}"
+            return data, name, mime
+        try:
+            from io import BytesIO
+
+            from PIL import Image
+
+            im = Image.open(BytesIO(data))
+            im.load()
+            # Normalize mode
+            if im.mode in ("RGBA", "LA", "P"):
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                if im.mode == "P":
+                    im = im.convert("RGBA")
+                if im.mode in ("RGBA", "LA"):
+                    alpha = im.split()[-1]
+                    bg.paste(im.convert("RGBA"), mask=alpha)
+                    im = bg
+                else:
+                    im = im.convert("RGB")
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            w, h = im.size
+            edge = max(w, h)
+            if edge > max_edge > 0:
+                scale = max_edge / float(edge)
+                im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.Resampling.LANCZOS)
+            out = BytesIO()
+            im.save(out, format="JPEG", quality=int(jpeg_quality), optimize=True)
+            raw = out.getvalue()
+            # Only use compressed if actually smaller (or resized)
+            if len(raw) < len(data) or edge > max_edge:
+                base = Path(_safe_name(source_name)).stem or "image"
+                return raw, f"{base}.jpg", "image/jpeg"
+        except Exception:
+            pass
+        # Fallback: store original
+        name = _safe_name(source_name)
+        suf = Path(name).suffix.lower()
+        mime = "application/octet-stream"
+        if suf in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+            mime = f"image/{suf.lstrip('.').replace('jpg', 'jpeg')}"
+        return data, name, mime
+
+    def add_attachment(
+        self,
+        note_id: str,
+        src_path: str | Path,
+        *,
+        display_name: str | None = None,
+        compress_images: bool = True,
+        max_edge: int = 1280,
+        jpeg_quality: int = 85,
+    ) -> dict:
         src = Path(src_path)
         if not src.is_file():
             raise FileNotFoundError(str(src))
@@ -432,17 +503,28 @@ class NotebookStore:
         name = _safe_name(display_name or src.name)
         dest_dir = self.attach_dir / note_id
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / f"{aid}_{name}"
-        shutil.copy2(src, dest)
-        rel = f"attachments/{note_id}/{dest.name}"
-        mime = "application/octet-stream"
         suf = src.suffix.lower()
-        if suf in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
-            mime = f"image/{suf.lstrip('.').replace('jpg', 'jpeg')}"
-        elif suf == ".pdf":
-            mime = "application/pdf"
-        elif suf in {".txt", ".md"}:
-            mime = "text/plain"
+        is_image = suf in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic"}
+        mime = "application/octet-stream"
+        if compress_images and is_image:
+            raw, name, mime = self.compress_image_bytes(
+                src.read_bytes(),
+                max_edge=max_edge,
+                jpeg_quality=jpeg_quality,
+                source_name=name,
+            )
+            dest = dest_dir / f"{aid}_{name}"
+            dest.write_bytes(raw)
+        else:
+            dest = dest_dir / f"{aid}_{name}"
+            shutil.copy2(src, dest)
+            if is_image:
+                mime = f"image/{suf.lstrip('.').replace('jpg', 'jpeg')}"
+            elif suf == ".pdf":
+                mime = "application/pdf"
+            elif suf in {".txt", ".md"}:
+                mime = "text/plain"
+        rel = f"attachments/{note_id}/{dest.name}"
         item = {
             "id": aid,
             "name": name,
@@ -460,19 +542,32 @@ class NotebookStore:
         self._write_index(idx)
         return item
 
-    def add_image_bytes(self, note_id: str, data: bytes, *, name: str = "paste.png") -> dict:
+    def add_image_bytes(
+        self,
+        note_id: str,
+        data: bytes,
+        *,
+        name: str = "paste.png",
+        max_edge: int = 1280,
+        jpeg_quality: int = 85,
+    ) -> dict:
+        raw, out_name, _mime = self.compress_image_bytes(
+            data, max_edge=max_edge, jpeg_quality=jpeg_quality, source_name=name or "paste.jpg"
+        )
         tmp = self.root / "_tmp_paste"
         tmp.mkdir(parents=True, exist_ok=True)
-        path = tmp / _safe_name(name)
-        path.write_bytes(data)
+        path = tmp / _safe_name(out_name)
+        path.write_bytes(raw)
         try:
-            return self.add_attachment(note_id, path, display_name=name)
+            # Already compressed — skip second pass
+            return self.add_attachment(
+                note_id, path, display_name=out_name, compress_images=False
+            )
         finally:
             try:
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
-
     def attachment_path(self, note_id: str, att: dict) -> Path:
         rel = str(att.get("rel") or "").replace("\\", "/")
         if rel:

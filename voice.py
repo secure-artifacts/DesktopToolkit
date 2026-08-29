@@ -36,15 +36,42 @@ class VoiceService(QObject):
         use_voice = self.enabled() if force_voice is None else force_voice
         if not use_voice:
             return
-        if self._busy:
+        # Non-forced tips may skip when busy; forced (weather / test) always speak.
+        if self._busy and force_voice is not True:
             return
         self._busy = True
-
         def _run() -> None:
             try:
                 import win32com.client  # type: ignore
 
                 voice = win32com.client.Dispatch("SAPI.SpVoice")
+                # Prefer a matching language voice so Chinese weather is not
+                # spoken by an English-only voice (often silent / garbled).
+                try:
+                    want_zh = any("\u4e00" <= ch <= "\u9fff" for ch in text)
+                    voices = voice.GetVoices()
+                    picked = None
+                    for i in range(int(voices.Count)):
+                        item = voices.Item(i)
+                        desc = str(item.GetDescription() or "")
+                        low = desc.lower()
+                        if want_zh and (
+                            "chinese" in low
+                            or "huihui" in low
+                            or "yaoyao" in low
+                            or "kangkang" in low
+                            or "zh-cn" in low
+                            or "中文" in desc
+                        ):
+                            picked = item
+                            break
+                        if (not want_zh) and ("english" in low or "zira" in low or "david" in low):
+                            picked = item
+                            break
+                    if picked is not None:
+                        voice.Voice = picked
+                except Exception:
+                    pass
                 voice.Speak(text)
             except Exception:
                 try:
@@ -59,7 +86,6 @@ class VoiceService(QObject):
                 self._busy = False
 
         threading.Thread(target=_run, daemon=True).start()
-
 
 class SubtitleToast(QWidget):
     """Bottom-center floating subtitle for tips."""

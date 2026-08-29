@@ -17,6 +17,7 @@ python3 -m PyInstaller --noconfirm --windowed --name DesktopToolkit \
   --add-data "logo.png:." \
   --add-data "logo.ico:." \
   --add-data "cloudflare:cloudflare" \
+  --add-data "VERSION:." \
   --hidden-import mss \
   --hidden-import imageio_ffmpeg \
   --hidden-import cv2 \
@@ -24,6 +25,13 @@ python3 -m PyInstaller --noconfirm --windowed --name DesktopToolkit \
   --hidden-import sounddevice \
   --hidden-import websockets \
   --hidden-import PyQt6.QtMultimedia \
+  --hidden-import weather \
+  --hidden-import notebook_store \
+  --hidden-import notebook_ui \
+  --hidden-import notebook_sync \
+  --hidden-import file_organizer \
+  --hidden-import file_organizer_ui \
+  --hidden-import PIL \
   --exclude-module torch \
   --exclude-module tensorflow \
   --exclude-module matplotlib \

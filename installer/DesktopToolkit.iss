@@ -2,7 +2,7 @@
 ; Builds a double-click Setup.exe from dist\DesktopToolkit\
 
 #define MyAppName "Desktop Toolkit"
-#define MyAppVersion "1.3.1"
+#define MyAppVersion "1.5.0"
 #define MyAppPublisher "Desktop Toolkit"
 #define MyAppURL "https://github.com/secure-artifacts/DesktopToolkit"
 #define MyAppExeName "DesktopToolkit.exe"
@@ -46,11 +46,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: unchecked
 Name: "autostart"; Description: "开机自动启动"; GroupDescription: "启动选项:"; Flags: unchecked
-
-[InstallDelete]
-; Avoid mixing old PyInstaller runtime files with the new release.
-Type: filesandordirs; Name: "{app}\_internal"
-Type: files; Name: "{app}\{#MyAppExeName}"
 
 [Files]
 ; Full onedir PyInstaller tree

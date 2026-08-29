@@ -123,6 +123,8 @@ class FloatingAssistant(QWidget):
         items = [
             ("待办事项", self._act_todos),
             ("便签", self._act_notes),
+            ("笔记本", self._act_notebook),
+            ("文件整理", self._act_organize),
             ("番茄钟", self._act_pomo),
             ("闹钟", self._act_alarm),
             ("天气播报", self._act_weather),
@@ -279,6 +281,22 @@ class FloatingAssistant(QWidget):
         self.host.show_notes()
         self.menu.hide()
 
+    def _act_notebook(self) -> None:
+        self._tip("打开笔记本")
+        try:
+            self.host.show_notebook()
+        except Exception:
+            pass
+        self.menu.hide()
+
+    def _act_organize(self) -> None:
+        self._tip("打开文件整理")
+        try:
+            self.host.show_file_organizer()
+        except Exception:
+            pass
+        self.menu.hide()
+
     def _act_pomo(self) -> None:
         self._tip("打开番茄钟")
         self.host.show_pomodoro()
@@ -330,6 +348,12 @@ class FloatingAssistant(QWidget):
         self.menu.hide()
 
     def _act_hub(self) -> None:
-        self._tip("打开主界面")
-        self.host.show_hub()
+        # Hide menu first so it doesn't cover / steal focus from the hub
         self.menu.hide()
+        try:
+            self.host.show_hub()
+        except Exception as e:
+            self._tip(f"打开主界面失败：{e}")
+            return
+        # Light tip after show — don't block opening
+        QTimer.singleShot(50, lambda: self._tip("已打开主界面"))

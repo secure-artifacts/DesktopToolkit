@@ -265,6 +265,7 @@ if IS_MAC:
         ("logs", "日志", "Library/Logs、诊断报告"),
         ("xcode", "Xcode 缓存", "DerivedData / ModuleCache（开发者）"),
     ]
+    DEEP_SCOPES: list[tuple[str, str, str]] = []
 else:
     CLEAN_SCOPES = [
         ("browser", "浏览器缓存", "Chrome / Edge / Firefox 等缓存与 Code Cache"),
@@ -275,8 +276,18 @@ else:
         ("wu", "系统更新缓存", "SoftwareDistribution\\Download"),
         ("delivery", "传递优化", "Delivery Optimization 缓存"),
     ]
+    DEEP_SCOPES = [
+        ("wer", "错误报告", "Windows Error Reporting 队列与历史"),
+        ("dumps", "崩溃转储", "CrashDumps / Minidump（可释放较大空间）"),
+        ("dxcache", "GPU/着色器缓存", "DirectX、NVIDIA、AMD 着色器缓存"),
+        ("recent", "最近使用记录", "最近打开的文件快捷方式（不影响原文件）"),
+        ("chatcache", "聊天软件缓存", "Discord / Slack / Teams 等本地缓存"),
+        ("applogs", "系统与应用日志", "用户日志、部分 Windows 诊断日志"),
+    ]
 
 DEFAULT_SCOPES: list[str] = [s[0] for s in CLEAN_SCOPES]
+DEEP_SCOPE_IDS: list[str] = [s[0] for s in DEEP_SCOPES]
+ALL_CLEAN_SCOPES: list[tuple[str, str, str]] = list(CLEAN_SCOPES) + list(DEEP_SCOPES)
 
 
 def _clean_browser(report: CleanReport) -> None:
@@ -319,12 +330,112 @@ def _clean_thumbs(report: CleanReport) -> None:
         report.notes.append("缩略图缓存")
 
 
+def _clean_wer(report: CleanReport) -> None:
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    program_data = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+    for label, path in (
+        ("WER ReportQueue", local / "Microsoft" / "Windows" / "WER" / "ReportQueue"),
+        ("WER ReportArchive", local / "Microsoft" / "Windows" / "WER" / "ReportArchive"),
+        ("WER Temp", local / "Microsoft" / "Windows" / "WER" / "Temp"),
+        ("WER ProgramData", program_data / "Microsoft" / "Windows" / "WER"),
+    ):
+        _clear_directory_contents(path, report, label)
+
+
+def _clean_dumps(report: CleanReport) -> None:
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    windir = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    for label, path in (
+        ("用户 CrashDumps", local / "CrashDumps"),
+        ("Minidump", windir / "Minidump"),
+        ("MEMORY.DMP", windir / "MEMORY.DMP"),
+    ):
+        if path.is_file():
+            before = report.bytes_freed
+            _remove_path(path, report)
+            if report.bytes_freed > before:
+                report.notes.append(label)
+        else:
+            _clear_directory_contents(path, report, label)
+
+
+def _clean_dxcache(report: CleanReport) -> None:
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    for label, path in (
+        ("DirectX 着色器缓存", local / "D3DSCache"),
+        ("NVIDIA DXCache", local / "NVIDIA" / "DXCache"),
+        ("NVIDIA GLCache", local / "NVIDIA" / "GLCache"),
+        ("AMD DXCache", local / "AMD" / "DxCache"),
+        ("AMD DX9Cache", local / "AMD" / "Dx9Cache"),
+        ("Intel ShaderCache", local / "Intel" / "ShaderCache"),
+    ):
+        _clear_directory_contents(path, report, label)
+
+
+def _clean_recent(report: CleanReport) -> None:
+    recent = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Recent"
+    if not recent.exists():
+        return
+    before = report.bytes_freed
+    try:
+        for child in recent.iterdir():
+            if child.suffix.lower() in {".lnk", ".url"} or child.is_file():
+                _remove_path(child, report)
+    except OSError as exc:
+        report.errors.append(f"最近使用记录: {exc}")
+        return
+    if report.bytes_freed > before or report.files_removed > 0:
+        report.notes.append("最近使用记录")
+
+
+def _clean_chatcache(report: CleanReport) -> None:
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    roaming = Path(os.environ.get("APPDATA", ""))
+    for label, path in (
+        ("Discord Cache", roaming / "discord" / "Cache"),
+        ("Discord Code Cache", roaming / "discord" / "Code Cache"),
+        ("Discord GPUCache", roaming / "discord" / "GPUCache"),
+        ("Slack Cache", roaming / "Slack" / "Cache"),
+        ("Slack Code Cache", roaming / "Slack" / "Code Cache"),
+        ("Teams Cache", roaming / "Microsoft" / "Teams" / "Cache"),
+        ("Teams blob_storage", roaming / "Microsoft" / "Teams" / "blob_storage"),
+        ("Telegram tdata\\temp", roaming / "Telegram Desktop" / "tdata" / "temp"),
+    ):
+        _clear_directory_contents(path, report, label)
+    del local
+
+
+def _clean_applogs(report: CleanReport) -> None:
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    windir = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    for label, path in (
+        ("WindowsUpdate 日志", windir / "Logs" / "WindowsUpdate"),
+        ("CBS 日志目录", windir / "Logs" / "CBS"),
+        ("DISM 日志目录", windir / "Logs" / "DISM"),
+        ("诊断日志", local / "DiagnosticLogs"),
+    ):
+        if path.exists() and path.is_dir():
+            before = report.bytes_freed
+            try:
+                for child in path.iterdir():
+                    if child.is_file() and child.suffix.lower() in {".log", ".cab", ".txt", ".etl"}:
+                        # Keep locked CBS.log
+                        if child.name.lower() == "cbs.log":
+                            continue
+                        _remove_path(child, report)
+            except OSError as exc:
+                report.errors.append(f"{label}: {exc}")
+                continue
+            if report.bytes_freed > before:
+                report.notes.append(label)
+
+
 def run_selective_clean(scopes: list[str] | set[str] | None = None) -> CleanReport:
     """Clean only selected scopes. Empty/None = all default scopes for this OS."""
     report = CleanReport()
     chosen = set(scopes) if scopes is not None else set(DEFAULT_SCOPES)
     # Drop scopes that don't apply on this platform
-    valid = {s[0] for s in CLEAN_SCOPES}
+    valid = {s[0] for s in ALL_CLEAN_SCOPES}
     chosen = {c for c in chosen if c in valid}
     if not chosen:
         report.notes.append("未选择任何清理范围")
@@ -383,6 +494,19 @@ def run_selective_clean(scopes: list[str] | set[str] | None = None) -> CleanRepo
             clean_windows_update_download(report)
         if "delivery" in chosen:
             clean_delivery_optimization(report)
+        # Deep extras
+        if "wer" in chosen:
+            _clean_wer(report)
+        if "dumps" in chosen:
+            _clean_dumps(report)
+        if "dxcache" in chosen:
+            _clean_dxcache(report)
+        if "recent" in chosen:
+            _clean_recent(report)
+        if "chatcache" in chosen:
+            _clean_chatcache(report)
+        if "applogs" in chosen:
+            _clean_applogs(report)
 
     if not report.notes and report.files_removed == 0 and not report.errors:
         report.notes.append("没有找到可清理的垃圾（或文件正在被占用）")
@@ -390,8 +514,8 @@ def run_selective_clean(scopes: list[str] | set[str] | None = None) -> CleanRepo
 
 
 def run_deep_clean() -> CleanReport:
-    """Run a best-effort deep clean (all scopes). Skips locked files without crashing."""
-    return run_selective_clean(DEFAULT_SCOPES)
+    """Run best-effort deep clean: default scopes + deep extras."""
+    return run_selective_clean(list(DEFAULT_SCOPES) + list(DEEP_SCOPE_IDS))
 
 
 def run_deep_clean_async(

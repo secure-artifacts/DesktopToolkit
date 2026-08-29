@@ -135,7 +135,7 @@ class MainWindow(QMainWindow):
 
             ver = QLabel(f"v{_VER}")
         except Exception:
-            ver = QLabel("v1.2.0")
+            ver = QLabel(f"v{_VER}")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -213,7 +213,7 @@ class MainWindow(QMainWindow):
         p = ui_icon(icon)
         if p:
             b.setIcon(QIcon(str(p)))
-            b.setIconSize(QSize(24, 24))
+            b.setIconSize(QSize(28, 28))
         b.clicked.connect(cb)
         return b
 
@@ -230,7 +230,7 @@ class MainWindow(QMainWindow):
         grid.setVerticalSpacing(8)
         for i, (icon, text, cb) in enumerate(cards):
             grid.addWidget(self._home_card(icon, text, cb), 0, i)
-        for c in range(4):
+        for c in range(max(4, len(cards))):
             grid.setColumnStretch(c, 1)
         lay.addLayout(grid)
         return wrap
@@ -284,6 +284,7 @@ class MainWindow(QMainWindow):
                 [
                     ("music", "音乐播放器", lambda: self.goto("music")),
                     ("clean", "清理电脑", lambda: self.goto("clean")),
+                    ("organize", "文件整理", self.host.show_file_organizer),
                     ("alarm", "天气播报", lambda: self.host.announce_weather(force=True)),
                 ],
             )
@@ -864,10 +865,23 @@ class MainWindow(QMainWindow):
 
         # ---- Weather broadcast ----
         wcfg = self.host.store.state.setdefault("weather", {})
+        # Migrate older builds that wrote display labels into location_text and
+        # then broke auto mode on the next announce.
+        try:
+            loc = str(wcfg.get("location_text") or "")
+            mode = str(wcfg.get("location_mode") or "auto").lower()
+            if mode == "auto" and (" · " in loc or "·" in loc):
+                if not wcfg.get("last_place"):
+                    wcfg["last_place"] = loc
+                wcfg["location_text"] = ""
+                self.host.store.save_state()
+        except Exception:
+            pass
         lay.addWidget(QLabel("天气播报", objectName="section"))
         tip_w = QLabel(
             "默认使用 Open-Meteo（欧洲开源气象，整合 ECMWF / DWD / NOAA 等模型，无需密钥）。"
-            "也可选 OpenWeatherMap（需自行填写 API Key）。请设置当地位置。"
+            "也可选 OpenWeatherMap（需自行填写 API Key）。"
+            "「自动」按公网 IP 定位；若播报失败，请改「手动城市名」填当地城市后点立即播报。"
         )
         tip_w.setObjectName("muted")
         tip_w.setWordWrap(True)
@@ -949,7 +963,7 @@ class MainWindow(QMainWindow):
 
             ver_txt = APP_VERSION
         except Exception:
-            ver_txt = "1.2.0"
+            ver_txt = "1.5.0"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)

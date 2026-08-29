@@ -450,7 +450,27 @@ class RecordingControlBar(QWidget):
         lay.addWidget(self.btn_stop)
         root.addWidget(bar)
         self.adjustSize()
+        self._expanded = False
+        self._collapse_timer = QTimer(self)
+        self._collapse_timer.setSingleShot(True)
+        self._collapse_timer.timeout.connect(self._auto_collapse)
+        self.lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         QTimer.singleShot(0, self._exclude_from_capture)
+
+    def _auto_collapse(self) -> None:
+        """Hide full toolbar again while still recording (not paused)."""
+        try:
+            if not self.isVisible():
+                return
+            if self.board.recorder and getattr(self.board.recorder, "is_paused", False):
+                return
+            if self.board.recorder and getattr(self.board.recorder, "is_recording", False):
+                self._expanded = False
+                self._apply_collapsed_chrome(collapsed=True)
+                self._exclude_from_capture()
+                self._place_outside_capture()
+        except Exception:
+            pass
 
     def _exclude_from_capture(self) -> None:
         """Keep floating toolbar out of the recorded video (Windows)."""
@@ -492,50 +512,97 @@ class RecordingControlBar(QWidget):
         # keep recording; only wipe overlay paint
 
     def set_recording_ui(self, recording: bool, paused: bool = False) -> None:
+        """Show/hide recording controls.
+
+        mss BitBlt often still captures WDA_EXCLUDEFROMCAPTURE windows, so during
+        active recording we collapse to a tiny chip *outside* the capture region.
+        Full toolbar shows when paused or when the chip is clicked.
+        """
         if not recording:
+            self._expanded = False
             self.hide()
             return
         self.lbl.setText("⏸ 已暂停" if paused else "🔴 录制中")
         self.btn_pause.setText("继续" if paused else "暂停")
+        # Paused → always show full bar (user needs controls); recording → collapsed
+        if paused:
+            self._expanded = True
+        self._apply_collapsed_chrome(collapsed=not self._expanded)
         self.show()
         self.raise_()
         self._exclude_from_capture()
-        # Place control bar near bottom — prefer just below capture region when possible
+        self._place_outside_capture()
+        if self._expanded and not paused:
+            # Auto-collapse so the bar doesn't linger in the video
+            self._collapse_timer.start(3500)
+
+    def _apply_collapsed_chrome(self, *, collapsed: bool) -> None:
+        """Collapsed = only a small red chip; expanded = full toolbar."""
+        widgets = [
+            self.btn_cursor,
+            self.btn_brush,
+            self.cmb_brush,
+            self.btn_clear,
+            self.btn_pause,
+            self.btn_stop,
+        ]
+        for w in widgets:
+            w.setVisible(not collapsed)
+        if collapsed:
+            self.lbl.setText("🔴 点击展开工具条")
+            self.lbl.setToolTip("录制中已隐藏工具条（避免进画面）。点击展开，暂停时也会自动展开。")
+        else:
+            self.lbl.setToolTip("录制控制条（已尽量放在录像区域外，并排除出系统捕获）")
+        self.adjustSize()
+
+    def _place_outside_capture(self) -> None:
         from PyQt6.QtGui import QGuiApplication
 
         scr = QGuiApplication.primaryScreen()
-        if scr:
-            g = scr.availableGeometry()
-            self.adjustSize()
-            x = g.center().x() - self.width() // 2
-            y = g.bottom() - self.height() - 24
-            try:
-                # If we know capture region, put bar outside it (below) so even
-                # without ExcludeFromCapture it stays out of the frame.
-                reg = None
-                if self.board.overlay and self.board.overlay.target_region:
-                    reg = self.board.overlay.target_region
-                elif self.board.recorder:
-                    reg = screen_recorder.resolve_region(getattr(self.board.recorder.cfg, "target", None))
-                if reg:
-                    rx = int(reg.get("left") or 0)
-                    ry = int(reg.get("top") or 0)
-                    rw = int(reg.get("width") or 0)
-                    rh = int(reg.get("height") or 0)
-                    # Center under the capture rect if space allows
-                    x = rx + max(0, (rw - self.width()) // 2)
-                    below = ry + rh + 8
-                    if below + self.height() <= g.bottom() - 4:
-                        y = below
+        if not scr:
+            return
+        g = scr.availableGeometry()
+        self.adjustSize()
+        x = g.center().x() - self.width() // 2
+        y = g.bottom() - self.height() - 24
+        try:
+            reg = None
+            if self.board.overlay and self.board.overlay.target_region:
+                reg = self.board.overlay.target_region
+            elif self.board.recorder:
+                reg = screen_recorder.resolve_region(getattr(self.board.recorder.cfg, "target", None))
+            if reg:
+                rx = int(reg.get("left") or 0)
+                ry = int(reg.get("top") or 0)
+                rw = int(reg.get("width") or 0)
+                rh = int(reg.get("height") or 0)
+                x = rx + max(0, (rw - self.width()) // 2)
+                below = ry + rh + 8
+                if below + self.height() <= g.bottom() - 4:
+                    y = below
+                else:
+                    above = ry - self.height() - 8
+                    if above >= g.top() + 4:
+                        y = above
                     else:
-                        # Above capture region
-                        above = ry - self.height() - 8
-                        if above >= g.top() + 4:
-                            y = above
-            except Exception:
-                pass
-            self.move(x, y)
+                        # Last resort: pin to screen corner outside typical capture
+                        x = g.right() - self.width() - 12
+                        y = g.top() + 12
+        except Exception:
+            pass
+        self.move(x, y)
 
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        # Click collapsed chip → expand full toolbar
+        if e.button() == Qt.MouseButton.LeftButton and not self.btn_pause.isVisible():
+            self._expanded = True
+            self._apply_collapsed_chrome(collapsed=False)
+            self._exclude_from_capture()
+            self._place_outside_capture()
+            self._collapse_timer.start(5000)
+            e.accept()
+            return
+        super().mousePressEvent(e)
 
 class FloatingRecorderBoard(QWidget):
     """Recorder settings (+ optional floating control bar while recording)."""

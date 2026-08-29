@@ -65,6 +65,7 @@ DEFAULT_STATE: dict[str, Any] = {
         "provider": "open-meteo",  # open-meteo (default) | openweathermap
         "location_mode": "auto",  # auto | manual | coords
         "location_text": "",
+        "last_place": "",
         "latitude": "",
         "longitude": "",
         "owm_api_key": "",
