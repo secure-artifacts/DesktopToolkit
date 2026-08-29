@@ -78,14 +78,66 @@ _HIGHLIGHT_COLORS = (
 )
 
 
+def _normalize_http_url(url: str) -> str | None:
+    """Parse and validate an http(s) URL. Returns cleaned URL or None on failure."""
+    from urllib.parse import urlparse, urlunparse
+
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    # Strip common wrappers / control chars that break parsing
+    raw = raw.strip(" \t\r\n<>\"'`")
+    raw = re.sub(r"[\x00-\x1f\x7f]", "", raw)
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    try:
+        u = urlparse(raw)
+    except Exception:
+        return None
+    scheme = (u.scheme or "").lower()
+    if scheme not in {"http", "https"}:
+        return None
+    host = (u.hostname or "").lower().strip(".")
+    if not host:
+        return None
+    # Reject obviously invalid hosts
+    if " " in host or host.startswith(".") or ".." in host:
+        return None
+    # Rebuild without credentials / fragments that shouldn't be stored in notes as-is
+    try:
+        cleaned = urlunparse(
+            (scheme, host + (f":{u.port}" if u.port else ""), u.path or "", "", u.query or "", "")
+        )
+    except Exception:
+        return None
+    return cleaned
+
+
+def _host_matches(host: str, *domains: str) -> bool:
+    """True if host is exactly domain or a subdomain (not a substring spoof)."""
+    host = (host or "").lower().strip(".")
+    if not host:
+        return False
+    for domain in domains:
+        d = (domain or "").lower().strip(".")
+        if not d:
+            continue
+        if host == d or host.endswith("." + d):
+            return True
+    return False
+
+
 def fetch_link_title(url: str) -> str:
     """Best-effort page/sheet title for hyperlink display text."""
     import html as html_lib
     import urllib.request
 
+    cleaned = _normalize_http_url(url)
+    if not cleaned:
+        return ""
     try:
         req = urllib.request.Request(
-            url,
+            cleaned,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -138,28 +190,35 @@ def fetch_link_title(url: str) -> str:
 
 def _guess_link_label(url: str) -> str:
     """Offline fallback label when title fetch fails."""
-    try:
-        from urllib.parse import urlparse, unquote
+    from urllib.parse import urlparse, unquote
 
-        u = urlparse(url)
-        host = (u.netloc or "").lower()
-        path = unquote(u.path or "")
-        if "docs.google.com/spreadsheets" in url:
-            return "Google 表格"
-        if "docs.google.com/document" in url:
-            return "Google 文档"
-        if "docs.google.com/presentation" in url:
-            return "Google 幻灯片"
-        if "drive.google.com" in host:
-            return "Google Drive 文件"
-        if "youtube.com" in host or "youtu.be" in host:
-            return "YouTube 视频"
-        name = path.rstrip("/").split("/")[-1]
-        if name and "." in name and len(name) < 60:
-            return name
-        return host or url
+    cleaned = _normalize_http_url(url)
+    if not cleaned:
+        return (url or "")[:80] or "链接"
+    try:
+        u = urlparse(cleaned)
     except Exception:
-        return url[:80]
+        return cleaned[:80]
+    host = (u.hostname or "").lower()
+    path = unquote(u.path or "")
+    path_parts = [p for p in path.split("/") if p]
+
+    if _host_matches(host, "docs.google.com"):
+        if path_parts and path_parts[0] == "spreadsheets":
+            return "Google 表格"
+        if path_parts and path_parts[0] == "document":
+            return "Google 文档"
+        if path_parts and path_parts[0] == "presentation":
+            return "Google 幻灯片"
+        return "Google Docs"
+    if _host_matches(host, "drive.google.com"):
+        return "Google Drive 文件"
+    if _host_matches(host, "youtube.com", "youtu.be"):
+        return "YouTube 视频"
+    name = path.rstrip("/").split("/")[-1] if path else ""
+    if name and "." in name and len(name) < 60:
+        return name
+    return host or cleaned[:80]
 
 def _html_to_markdown_simple(html: str) -> str:
     text = html or ""
@@ -1200,29 +1259,24 @@ class NotebookWindow(QMainWindow):
         url, ok = QInputDialog.getText(self, "插入超链接", "网址（https://…）：")
         if not ok:
             return
-        url = (url or "").strip()
-        if not url:
-            return
-        if not re.match(r"^https?://", url, re.I):
-            url = "https://" + url
-        self._on_link_pasted(url)
+        self._on_link_pasted(url or "")
 
     def _on_link_pasted(self, url: str) -> None:
-        url = (url or "").strip()
-        if not url:
+        cleaned = _normalize_http_url(url)
+        if not cleaned:
+            QMessageBox.warning(self, "链接无效", "无法解析该网址，请检查后重试。")
             return
-        label = _guess_link_label(url)
+        label = _guess_link_label(cleaned)
         # Insert immediately with fallback label, then upgrade title async
-        self._insert_hyperlink(url, label or url)
+        self._insert_hyperlink(cleaned, label or cleaned)
         self.lbl_status.setText("正在读取链接标题…")
 
         def work() -> None:
-            title = fetch_link_title(url)
+            title = fetch_link_title(cleaned)
             if title:
 
                 def apply() -> None:
-                    # Replace last inserted link text if still same URL nearby
-                    self._upgrade_link_label(url, title)
+                    self._upgrade_link_label(cleaned, title)
                     self.lbl_status.setText(f"链接标题：{title}")
                     self._mark_dirty()
 
@@ -1235,7 +1289,6 @@ class NotebookWindow(QMainWindow):
                 QTimer.singleShot(0, done)
 
         threading.Thread(target=work, daemon=True).start()
-
     def _insert_hyperlink(self, url: str, label: str) -> None:
         if self.tabs.currentIndex() == 1:
             # Markdown tab
