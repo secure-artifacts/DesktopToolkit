@@ -1,4 +1,4 @@
-"""Check for application updates from GitHub Releases; optional download + run installer."""
+﻿"""Check for application updates from GitHub Releases; optional download + run installer."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Bump when shipping a new installer.
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
-# Public releases channel (organization repo — no personal account)
+# Public releases channel (organization repo 鈥?no personal account)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -57,7 +57,7 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
             current=current,
             latest="",
             has_update=False,
-            message=f"检查更新失败：{exc}",
+            message=f"妫€鏌ユ洿鏂板け璐ワ細{exc}",
             release_url=RELEASES_PAGE,
         )
 
@@ -92,15 +92,15 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
             current=current,
             latest="",
             has_update=False,
-            message="未找到发布版本信息。",
+            message="鏈壘鍒板彂甯冪増鏈俊鎭€?,
             release_url=html_url,
         )
 
     has_update = _normalize_version(latest) > _normalize_version(current)
     if has_update:
-        msg = f"发现新版本 {latest}（当前 {current}）。"
+        msg = f"鍙戠幇鏂扮増鏈?{latest}锛堝綋鍓?{current}锛夈€?
     else:
-        msg = f"已是最新版本 {current}。"
+        msg = f"宸叉槸鏈€鏂扮増鏈?{current}銆?
     return UpdateCheckResult(
         ok=True,
         current=current,
@@ -123,10 +123,10 @@ def download_update(
 ) -> Path:
     """Download installer/asset to a local file. Raises on failure."""
     if not url or not str(url).startswith("http"):
-        raise ValueError("没有可下载的安装包地址，请打开下载页手动获取。")
+        raise ValueError("娌℃湁鍙笅杞界殑瀹夎鍖呭湴鍧€锛岃鎵撳紑涓嬭浇椤垫墜鍔ㄨ幏鍙栥€?)
     low = str(url).lower()
     if "/releases/tag/" in low and not any(low.endswith(ext) for ext in (".exe", ".zip", ".7z")):
-        raise ValueError("没有可下载的安装包地址，请打开下载页手动获取。")
+        raise ValueError("娌℃湁鍙笅杞界殑瀹夎鍖呭湴鍧€锛岃鎵撳紑涓嬭浇椤垫墜鍔ㄨ幏鍙栥€?)
     dest_dir = dest_dir or Path(tempfile.gettempdir()) / "DesktopToolkitUpdates"
     dest_dir.mkdir(parents=True, exist_ok=True)
     name = (filename or "").strip() or urllib_parse_unquote_name(url) or "DesktopToolkit-update.exe"
@@ -152,7 +152,7 @@ def download_update(
                     except Exception:
                         pass
     if not dest.is_file() or dest.stat().st_size < 1024:
-        raise RuntimeError("下载文件无效或过小。")
+        raise RuntimeError("涓嬭浇鏂囦欢鏃犳晥鎴栬繃灏忋€?)
     return dest
 
 

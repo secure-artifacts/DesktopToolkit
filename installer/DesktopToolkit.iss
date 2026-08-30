@@ -1,8 +1,8 @@
-; Desktop Toolkit — Windows installer (Inno Setup 6)
+﻿; Desktop Toolkit 鈥?Windows installer (Inno Setup 6)
 ; Builds a double-click Setup.exe from dist\DesktopToolkit\
 
 #define MyAppName "Desktop Toolkit"
-#define MyAppVersion "1.6.0"
+#define MyAppVersion "1.6.1"
 #define MyAppPublisher "Desktop Toolkit"
 #define MyAppURL "https://github.com/secure-artifacts/DesktopToolkit"
 #define MyAppExeName "DesktopToolkit.exe"
@@ -44,8 +44,8 @@ RestartApplications=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: unchecked
-Name: "autostart"; Description: "开机自动启动"; GroupDescription: "启动选项:"; Flags: unchecked
+Name: "desktopicon"; Description: "鍒涘缓妗岄潰蹇嵎鏂瑰紡"; GroupDescription: "闄勫姞鍥炬爣:"; Flags: unchecked
+Name: "autostart"; Description: "寮€鏈鸿嚜鍔ㄥ惎鍔?; GroupDescription: "鍚姩閫夐」:"; Flags: unchecked
 
 [Files]
 ; Full onedir PyInstaller tree
@@ -53,7 +53,7 @@ Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdir
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{group}\鍗歌浇 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
@@ -63,4 +63,4 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
   Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "绔嬪嵆鍚姩 {#MyAppName}"; Flags: nowait postinstall skipifsilent
