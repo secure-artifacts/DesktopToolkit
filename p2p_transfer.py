@@ -100,41 +100,63 @@ def prepare_send_payload(
 
 
 def normalize_ws_url(url: str, room: str) -> str:
-    u = (url or "").strip().rstrip("/")
-    if not u:
+    """Normalize Worker URL to wss/ws .../ws?room=CODE (urlparse, not substring checks)."""
+    from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+    raw = (url or "").strip()
+    if not raw:
         raise ValueError("请填写 Cloudflare Worker 地址（wss://xxx.workers.dev）")
-    if u.startswith("https://"):
-        u = "wss://" + u[len("https://") :]
-    elif u.startswith("http://"):
-        u = "ws://" + u[len("http://") :]
-    elif not u.startswith("ws://") and not u.startswith("wss://"):
-        u = "wss://" + u
-    # ensure /ws path
-    if "/ws" not in u:
-        u = u + "/ws"
-    sep = "&" if "?" in u else "?"
-    return f"{u}{sep}room={room.upper()}"
+    if "://" not in raw:
+        raw = "https://" + raw
+    p = urlparse(raw)
+    scheme = (p.scheme or "https").lower()
+    if scheme == "https":
+        scheme = "wss"
+    elif scheme == "http":
+        scheme = "ws"
+    elif scheme not in {"ws", "wss"}:
+        scheme = "wss"
+    host = (p.hostname or "").lower().strip(".")
+    if not host:
+        raise ValueError("中转地址缺少有效主机名")
+    netloc = host + (f":{p.port}" if p.port else "")
+    path = p.path or ""
+    # Ensure websocket endpoint path ends with /ws
+    path_norm = path.rstrip("/")
+    if not path_norm.endswith("/ws"):
+        path = (path_norm + "/ws") if path_norm else "/ws"
+    else:
+        path = path_norm
+    q = dict(parse_qsl(p.query, keep_blank_values=True))
+    q["room"] = room.upper().strip()
+    return urlunparse((scheme, netloc, path, "", urlencode(q), ""))
 
 
 def normalize_http_base(url: str) -> str:
-    """Turn wss/ws/https worker URL into https base (no /ws)."""
-    u = (url or "").strip().rstrip("/")
-    if not u:
+    """Turn wss/ws/https worker URL into https base (no /ws). Uses urlparse."""
+    from urllib.parse import urlparse, urlunparse
+
+    raw = (url or "").strip()
+    if not raw:
         raise ValueError("请填写 Cloudflare Worker 地址")
-    if u.startswith("wss://"):
-        u = "https://" + u[len("wss://") :]
-    elif u.startswith("ws://"):
-        u = "http://" + u[len("ws://") :]
-    elif u.startswith("http://") or u.startswith("https://"):
-        pass
-    else:
-        u = "https://" + u
-    # strip /ws and query
-    if "?" in u:
-        u = u.split("?", 1)[0]
-    if u.endswith("/ws"):
-        u = u[: -len("/ws")]
-    return u.rstrip("/")
+    if "://" not in raw:
+        raw = "https://" + raw
+    p = urlparse(raw)
+    scheme = (p.scheme or "https").lower()
+    if scheme == "wss":
+        scheme = "https"
+    elif scheme == "ws":
+        scheme = "http"
+    elif scheme not in {"http", "https"}:
+        scheme = "https"
+    host = (p.hostname or "").lower().strip(".")
+    if not host:
+        raise ValueError("中转地址缺少有效主机名")
+    netloc = host + (f":{p.port}" if p.port else "")
+    path = (p.path or "").rstrip("/")
+    if path.endswith("/ws"):
+        path = path[: -len("/ws")]
+    return urlunparse((scheme, netloc, path, "", "", "")).rstrip("/")
 
 
 def fetch_worker_health(signal_url: str, timeout: float = 8.0) -> dict:

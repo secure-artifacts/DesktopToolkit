@@ -533,12 +533,18 @@ class LanShareClient:
         self.remote_root_name = ""
 
     def connect(self, host: str, port: int, password: str, timeout: float = 5.0) -> str:
-        host = (host or "").strip().strip("/")
-        if host.startswith("http://"):
-            host = host[len("http://") :]
-        if host.startswith("https://"):
-            host = host[len("https://") :]
-        host = host.split("/")[0]
+        raw = (host or "").strip().strip("/")
+        # Accept pasted URLs; extract hostname via urlparse (not substring strip)
+        try:
+            from urllib.parse import urlparse
+
+            candidate = raw if "://" in raw else f"http://{raw}"
+            parsed = urlparse(candidate)
+            host = (parsed.hostname or "").strip(".")
+            if parsed.port and not port:
+                port = parsed.port
+        except Exception:
+            host = raw.split("/")[0].split(":")[0]
         if not host:
             return "请填写主机 IP 或主机名。"
         pwd = (password or "").strip()

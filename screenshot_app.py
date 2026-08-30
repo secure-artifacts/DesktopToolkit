@@ -2128,9 +2128,15 @@ def _parse_upload_result(result) -> tuple[str, str]:
     link = ""
     name = lines[0] if lines else ""
     for ln in lines:
-        if ln.startswith("http://") or ln.startswith("https://"):
-            link = ln
-            break
+        try:
+            from urllib.parse import urlparse
+
+            pu = urlparse(ln)
+            if (pu.scheme or "").lower() in {"http", "https"} and (pu.hostname or ""):
+                link = ln
+                break
+        except Exception:
+            continue
     if link and name == link:
         name = "截图"
     return link, name

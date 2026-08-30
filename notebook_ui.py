@@ -363,8 +363,14 @@ class _RichEdit(QTextEdit):
                     except Exception:
                         pass
                 s = url.toString().strip()
-                if s.startswith("http://") or s.startswith("https://"):
-                    http_urls.append(s)
+                try:
+                    from urllib.parse import urlparse
+
+                    pu = urlparse(s)
+                    if (pu.scheme or "").lower() in {"http", "https"} and (pu.hostname or ""):
+                        http_urls.append(s)
+                except Exception:
+                    pass
             if http_urls:
                 for u in http_urls:
                     self.link_pasted.emit(u)
