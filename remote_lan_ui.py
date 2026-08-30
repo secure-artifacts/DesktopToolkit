@@ -36,23 +36,31 @@ class _Bridge(QObject):
 class RemoteScreenView(QLabel):
     """Displays remote frames and forwards mouse/keyboard to the client."""
 
-    def __init__(self, client: LanRemoteClient, parent=None):
+    double_clicked = pyqtSignal()
+
+    def __init__(self, client: LanRemoteClient, parent=None, *, borderless: bool = False):
         super().__init__(parent)
         self._client = client
         self._pix_w = 1
         self._pix_h = 1
+        self._last_jpeg: bytes | None = None
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(480, 300)
-        self.setStyleSheet(
-            "QLabel { background: #0b1220; color: #94a3b8; border: 1px solid #334155; border-radius: 10px; }"
-        )
-        self.setText("连接后将显示对方桌面\n点击此处聚焦后可用鼠标键盘操控")
+        self.setMinimumSize(640, 420)
+        if borderless:
+            self.setStyleSheet("QLabel { background: #000; color: #94a3b8; border: 0; }")
+        else:
+            self.setStyleSheet(
+                "QLabel { background: #0b1220; color: #94a3b8; border: 1px solid #334155; border-radius: 10px; }"
+            )
+        self.setText("连接后将显示对方桌面\n双击或点「全屏操控」可放大\n点击此处聚焦后可用鼠标键盘操控")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setScaledContents(False)
 
     def set_frame(self, jpeg: bytes, w: int, h: int) -> None:
         self._pix_w = max(1, w)
         self._pix_h = max(1, h)
+        self._last_jpeg = jpeg
         img = QImage.fromData(QByteArray(jpeg), "JPG")
         if img.isNull():
             return
@@ -63,6 +71,16 @@ class RemoteScreenView(QLabel):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.setPixmap(scaled)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._last_jpeg:
+            self.set_frame(self._last_jpeg, self._pix_w, self._pix_h)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
 
     def _norm_pos(self, event: QMouseEvent) -> tuple[float, float] | None:
         pix = self.pixmap()
@@ -129,6 +147,59 @@ class RemoteScreenView(QLabel):
         super().keyReleaseEvent(event)
 
 
+class FullscreenRemoteWindow(QWidget):
+    """Dedicated fullscreen / maximized window for comfortable remote control."""
+
+    closed = pyqtSignal()
+
+    def __init__(self, client: LanRemoteClient, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("远程桌面 · 全屏操控（Esc 退出）")
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet("background: #000;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        bar = QHBoxLayout()
+        bar.setContentsMargins(10, 6, 10, 6)
+        tip = QLabel("全屏操控中 · Esc / F11 退出全屏 · 点击画面后可用键鼠")
+        tip.setStyleSheet("color: #cbd5e1; background: #111827; padding: 4px 8px;")
+        self.btn_exit = QPushButton("退出全屏")
+        self.btn_exit.setObjectName("soft")
+        self.btn_exit.clicked.connect(self.close)
+        bar.addWidget(tip, 1)
+        bar.addWidget(self.btn_exit)
+        wrap = QWidget()
+        wrap.setStyleSheet("background: #111827;")
+        wrap.setLayout(bar)
+        lay.addWidget(wrap)
+        self.view = RemoteScreenView(client, borderless=True)
+        lay.addWidget(self.view, 1)
+
+    def set_frame(self, jpeg: bytes, w: int, h: int) -> None:
+        self.view.set_frame(jpeg, w, h)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_F11):
+            self.close()
+            return
+        # Forward to view for remote input
+        self.view.keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_F11):
+            return
+        self.view.keyReleaseEvent(event)
+
+    def show_fullscreen(self) -> None:
+        self.showFullScreen()
+        self.view.setFocus()
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self.closed.emit()
+        super().closeEvent(event)
+
+
 def _qt_key(event: QKeyEvent) -> tuple[str, list[str]]:
     mods: list[str] = []
     m = event.modifiers()
@@ -178,6 +249,7 @@ class FloatingRemoteBoard(QWidget):
 
         self._lan_host = LanRemoteHost()
         self._lan_client = LanRemoteClient()
+        self._fs_win: FullscreenRemoteWindow | None = None
         self._bridge = _Bridge()
         self._bridge.status.connect(self._on_client_status)
         self._bridge.frame.connect(self._on_frame)
@@ -270,15 +342,21 @@ class FloatingRemoteBoard(QWidget):
         self.btn_connect = QPushButton("连接对方", objectName="primary")
         self.btn_disconnect = QPushButton("断开", objectName="soft")
         self.btn_disconnect.setEnabled(False)
+        self.btn_fullscreen = QPushButton("全屏操控", objectName="soft")
+        self.btn_fullscreen.setEnabled(False)
+        self.btn_fullscreen.setToolTip("打开全屏窗口方便操作（也可双击画面 / F11）")
         row_cb.addWidget(self.btn_connect)
         row_cb.addWidget(self.btn_disconnect)
+        row_cb.addWidget(self.btn_fullscreen)
         row_cb.addStretch(1)
         lay.addLayout(row_cb)
-        self.lbl_client_status = QLabel("未连接")
+        self.lbl_client_status = QLabel("未连接 · 连上后可点「全屏操控」或双击画面")
         self.lbl_client_status.setObjectName("muted")
         lay.addWidget(self.lbl_client_status)
 
         self.view = RemoteScreenView(self._lan_client)
+        self.view.setMinimumHeight(460)
+        self.view.double_clicked.connect(self._open_fullscreen)
         lay.addWidget(self.view, 1)
 
         help_l = QLabel(
@@ -294,6 +372,7 @@ class FloatingRemoteBoard(QWidget):
         self.btn_copy_ip.clicked.connect(self._copy_ip)
         self.btn_connect.clicked.connect(self._connect)
         self.btn_disconnect.clicked.connect(self._disconnect)
+        self.btn_fullscreen.clicked.connect(self._open_fullscreen)
 
         # Restore last peer from prefs
         try:
@@ -405,6 +484,7 @@ class FloatingRemoteBoard(QWidget):
         self.lbl_client_status.setText(msg)
         self.btn_connect.setEnabled(False)
         self.btn_disconnect.setEnabled(True)
+        self.btn_fullscreen.setEnabled(True)
         try:
             if self.host:
                 prefs = self.host.store.state.setdefault("prefs", {})
@@ -412,29 +492,69 @@ class FloatingRemoteBoard(QWidget):
                 self.host.store.save_state()
         except Exception:
             pass
+        # Auto open fullscreen shortly after connect for usable control
+        QTimer.singleShot(600, self._open_fullscreen)
 
     def _disconnect(self) -> None:
+        self._close_fullscreen()
         self._lan_client.disconnect()
         self.lbl_client_status.setText("已断开")
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
-        self.view.setText("已断开")
+        self.btn_fullscreen.setEnabled(False)
+        self.view.setText("已断开\n再次连接后可点「全屏操控」")
+
+    def _open_fullscreen(self) -> None:
+        if not self._lan_client.connected:
+            self.lbl_client_status.setText("请先连接对方，再全屏操控")
+            return
+        if self._fs_win is None:
+            self._fs_win = FullscreenRemoteWindow(self._lan_client)
+            self._fs_win.closed.connect(self._on_fs_closed)
+        self._fs_win.show_fullscreen()
+        self.lbl_client_status.setText("全屏操控中（Esc 退出全屏）")
+
+    def _close_fullscreen(self) -> None:
+        win = self._fs_win
+        if win is not None:
+            try:
+                win.close()
+            except Exception:
+                pass
+
+    def _on_fs_closed(self) -> None:
+        self._fs_win = None
+        if self._lan_client.connected:
+            self.lbl_client_status.setText("已退出全屏 · 可继续在小窗操作或再点「全屏操控」")
 
     def _on_client_status(self, msg: str) -> None:
         self.lbl_client_status.setText(msg)
+        if "已连接" in msg:
+            self.btn_fullscreen.setEnabled(True)
         if "失败" in msg or "认证失败" in msg:
             self.btn_connect.setEnabled(True)
             self.btn_disconnect.setEnabled(False)
+            self.btn_fullscreen.setEnabled(False)
+            self._close_fullscreen()
 
     def _on_frame(self, jpeg, w: int, h: int) -> None:
+        data = bytes(jpeg)
+        iw, ih = int(w), int(h)
         try:
-            self.view.set_frame(bytes(jpeg), int(w), int(h))
+            self.view.set_frame(data, iw, ih)
         except Exception:
             pass
+        if self._fs_win is not None:
+            try:
+                self._fs_win.set_frame(data, iw, ih)
+            except Exception:
+                pass
 
     def _on_client_closed(self) -> None:
+        self._close_fullscreen()
         self.btn_connect.setEnabled(True)
         self.btn_disconnect.setEnabled(False)
+        self.btn_fullscreen.setEnabled(False)
         if "失败" not in (self.lbl_client_status.text() or ""):
             self.lbl_client_status.setText("连接已关闭")
 
