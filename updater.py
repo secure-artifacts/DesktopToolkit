@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Bump when shipping a new installer (keep in sync with VERSION file).
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 # Public releases channel (organization repo)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
@@ -72,7 +72,7 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
             current=current,
             latest="",
             has_update=False,
-            message=f"妫€鏌ユ洿鏂板け璐ワ細{exc}",
+            message=f"检查更新失败：{exc}",
             release_url=RELEASES_PAGE,
         )
 
@@ -120,15 +120,15 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
             current=current,
             latest="",
             has_update=False,
-            message="鏈壘鍒板彂甯冪増鏈俊鎭€?,
+            message="未找到发布版本信息。",
             release_url=html_url,
         )
 
     has_update = _normalize_version(latest) > _normalize_version(current)
     if has_update:
-        msg = f"鍙戠幇鏂扮増鏈?{latest}锛堝綋鍓?{current}锛夈€?
+        msg = f"发现新版本 {latest}（当前 {current}）。"
     else:
-        msg = f"宸叉槸鏈€鏂扮増鏈?{current}銆?
+        msg = f"已是最新版本 {current}。"
     return UpdateCheckResult(
         ok=True,
         current=current,
@@ -151,17 +151,16 @@ def download_update(
 ) -> Path:
     """Download installer/asset to a local file. Raises on failure."""
     if not url or not str(url).startswith("http"):
-        raise ValueError("娌℃湁鍙笅杞界殑瀹夎鍖呭湴鍧€锛岃鎵撳紑涓嬭浇椤垫墜鍔ㄨ幏鍙栥€?)
+        raise ValueError("没有可下载的安装包地址，请打开下载页手动获取。")
     low = str(url).lower()
     if "/releases/tag/" in low and not any(low.endswith(ext) for ext in (".exe", ".zip", ".7z")):
-        raise ValueError("娌℃湁鍙笅杞界殑瀹夎鍖呭湴鍧€锛岃鎵撳紑涓嬭浇椤垫墜鍔ㄨ幏鍙栥€?)
+        raise ValueError("没有可下载的安装包地址，请打开下载页手动获取。")
     dest_dir = dest_dir or Path(tempfile.gettempdir()) / "DesktopToolkitUpdates"
     dest_dir.mkdir(parents=True, exist_ok=True)
     name = (filename or "").strip() or urllib_parse_unquote_name(url) or "DesktopToolkit-update.exe"
-    # sanitize
     name = re.sub(r"[^\w.\-]+", "_", name)[:120] or "update.bin"
     dest = dest_dir / name
-    headers = {"User-Agent": f"DesktopToolkit/{APP_VERSION}"}
+    headers = {"User-Agent": f"DesktopToolkit/{get_app_version()}"}
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
@@ -180,7 +179,7 @@ def download_update(
                     except Exception:
                         pass
     if not dest.is_file() or dest.stat().st_size < 1024:
-        raise RuntimeError("涓嬭浇鏂囦欢鏃犳晥鎴栬繃灏忋€?)
+        raise RuntimeError("下载文件无效或过小。")
     return dest
 
 
@@ -195,12 +194,11 @@ def urllib_parse_unquote_name(url: str) -> str:
 
 
 def launch_installer(path: Path) -> None:
-    """Start setup.exe / open zip folder. Caller may exit the app afterward."""
+    """Start setup.exe / open package. Caller may exit the app afterward."""
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(str(path))
     if sys.platform == "win32":
-        # Detached process so install can replace running files after exit
         subprocess.Popen(
             [str(path)],
             cwd=str(path.parent),
@@ -208,6 +206,8 @@ def launch_installer(path: Path) -> None:
             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
+    elif sys.platform == "darwin":
+        # .zip: open Finder; .dmg/.app: open
+        subprocess.Popen(["open", str(path)], cwd=str(path.parent))
     else:
         subprocess.Popen([str(path)], cwd=str(path.parent))
-
