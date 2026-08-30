@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, Qt, QSize, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QIcon
+from PyQt6.QtGui import QCloseEvent, QDesktopServices, QGuiApplication, QIcon
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -73,6 +73,15 @@ class MainWindow(QMainWindow):
         if logo.exists():
             self.setWindowIcon(QIcon(str(logo)))
 
+        # Prefer primary screen so dual-monitor setups don't lose the hub
+        try:
+            scr = QGuiApplication.primaryScreen()
+            if scr:
+                g = scr.availableGeometry()
+                self.move(g.left() + 60, g.top() + 40)
+        except Exception:
+            pass
+
         # Background-thread → main-thread (do NOT use QTimer from worker threads)
         self._update_bridge = _UpdateBridge(self)
         self._update_bridge.check_done.connect(self._on_update_check_done)
@@ -119,8 +128,13 @@ class MainWindow(QMainWindow):
                 self.btn_nav_p2p.setObjectName("nav")
                 self.btn_nav_p2p.setCheckable(True)
                 self.btn_nav_p2p.clicked.connect(lambda: self.goto_transfer("p2p"))
+                self.btn_nav_remote = QPushButton("远程控制")
+                self.btn_nav_remote.setObjectName("nav")
+                self.btn_nav_remote.setCheckable(True)
+                self.btn_nav_remote.clicked.connect(lambda: self.goto_transfer("remote"))
                 tsl.addWidget(self.btn_nav_lan)
                 tsl.addWidget(self.btn_nav_p2p)
+                tsl.addWidget(self.btn_nav_remote)
                 sl.addWidget(self.transfer_sub)
             else:
                 b = QPushButton(label)
@@ -188,6 +202,8 @@ class MainWindow(QMainWindow):
                 self.btn_nav_lan.setChecked(False)
             if hasattr(self, "btn_nav_p2p"):
                 self.btn_nav_p2p.setChecked(False)
+            if hasattr(self, "btn_nav_remote"):
+                self.btn_nav_remote.setChecked(False)
         if key in self._page_keys:
             self._ensure_page(key)
             self.stack.setCurrentIndex(self._page_keys.index(key))
@@ -271,10 +287,11 @@ class MainWindow(QMainWindow):
         )
         lay.addWidget(
             self._row(
-                "文件传输",
+                "文件传输与远程",
                 [
                     ("lan", "局域网共享", lambda: self.goto_transfer("lan")),
                     ("p2p", "跨网传文件", lambda: self.goto_transfer("p2p")),
+                    ("remote", "远程控制", lambda: self.goto_transfer("remote")),
                 ],
             )
         )
@@ -305,9 +322,16 @@ class MainWindow(QMainWindow):
                 self._show_transfer_p2p()
             elif hasattr(self, "btn_sub_p2p"):
                 self.btn_sub_p2p.click()
+        elif which == "remote":
+            if hasattr(self, "_show_transfer_remote"):
+                self._show_transfer_remote()
+            elif hasattr(self, "btn_sub_remote"):
+                self.btn_sub_remote.click()
         if hasattr(self, "btn_nav_lan"):
             self.btn_nav_lan.setChecked(which == "lan")
             self.btn_nav_p2p.setChecked(which == "p2p")
+            if hasattr(self, "btn_nav_remote"):
+                self.btn_nav_remote.setChecked(which == "remote")
             self.btn_nav_transfer.setChecked(True)
 
     def _page_shot(self) -> QWidget:
@@ -743,6 +767,17 @@ class MainWindow(QMainWindow):
         p2p_l.addWidget(self.host._embed_p2p)
         self.transfer_stack.addWidget(p2p_w)
 
+        # page 2 remote (RustDesk)
+        remote_w = QWidget()
+        remote_l = QVBoxLayout(remote_w)
+        remote_l.setContentsMargins(0, 0, 0, 0)
+        from remote_ui import FloatingRemoteBoard
+
+        if not getattr(self.host, "_embed_remote", None):
+            self.host._embed_remote = FloatingRemoteBoard(self.host, embedded=True)
+        remote_l.addWidget(self.host._embed_remote)
+        self.transfer_stack.addWidget(remote_w)
+
         outer.addWidget(self.transfer_stack, 1)
 
         # Compat stubs so goto_transfer can still "click" switches
@@ -750,6 +785,8 @@ class MainWindow(QMainWindow):
         self.btn_sub_lan.hide()
         self.btn_sub_p2p = QPushButton()
         self.btn_sub_p2p.hide()
+        self.btn_sub_remote = QPushButton()
+        self.btn_sub_remote.hide()
 
         def show_lan() -> None:
             self.transfer_stack.setCurrentIndex(0)
@@ -761,10 +798,19 @@ class MainWindow(QMainWindow):
         def show_p2p() -> None:
             self.transfer_stack.setCurrentIndex(1)
 
+        def show_remote() -> None:
+            self.transfer_stack.setCurrentIndex(2)
+            try:
+                self.host._embed_remote.refresh()
+            except Exception:
+                pass
+
         self.btn_sub_lan.clicked.connect(show_lan)
         self.btn_sub_p2p.clicked.connect(show_p2p)
+        self.btn_sub_remote.clicked.connect(show_remote)
         self._show_transfer_lan = show_lan
         self._show_transfer_p2p = show_p2p
+        self._show_transfer_remote = show_remote
         show_lan()
         return page
 
@@ -838,7 +884,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.chk_float_logo)
         tip_a = QLabel(
             "悬停打开快捷菜单；拖到任意位置后会记住。"
-            "macOS 默认关闭，需要时再勾选。关闭后不会一直停在角落。"
+            "会定时保持在其它窗口前面；若仍被盖住，可用托盘「找回悬浮机器人」。"
+            "独占全屏游戏期间系统可能压过置顶。"
+            "macOS 默认关闭，需要时再勾选。"
         )
         tip_a.setObjectName("muted")
         tip_a.setWordWrap(True)
@@ -1233,3 +1281,20 @@ class MainWindow(QMainWindow):
             except Exception:
                 return
         QDesktopServices.openUrl(QUrl(url))
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        """Close button hides to tray instead of destroying the window."""
+        event.ignore()
+        self.hide()
+        try:
+            if getattr(self.host, "tray", None):
+                from PyQt6.QtWidgets import QSystemTrayIcon
+
+                self.host.tray.showMessage(
+                    "Desktop Toolkit",
+                    "主界面已隐藏到托盘（进程仍在运行）。双击托盘图标或按 Ctrl+Alt+T 可再打开。",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+        except Exception:
+            pass

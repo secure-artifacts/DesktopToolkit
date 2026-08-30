@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QUrl, QPoint
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QUrl, QPoint, QRect
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -16,9 +16,13 @@ from PyQt6.QtGui import (
     QImage,
     QKeySequence,
     QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
     QShortcut,
     QTextCharFormat,
     QTextCursor,
+    QTextImageFormat,
     QTextListFormat,
 )
 from PyQt6.QtWidgets import (
@@ -318,16 +322,21 @@ def _inline_md(s: str) -> str:
 
 
 class _RichEdit(QTextEdit):
-    """QTextEdit that accepts image/URL paste and Ctrl+Click opens links."""
+    """QTextEdit: image/URL paste, Ctrl+Click links, drag-corner image resize."""
 
     image_pasted = pyqtSignal(bytes, str)
     link_pasted = pyqtSignal(str)
+
+    _HANDLE = 14  # hit area for bottom-right resize corner (px)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.document().setDefaultStyleSheet(
             "a { color: #38bdf8; text-decoration: underline; }"
         )
+        self.setMouseTracking(True)
+        self._img_resize: dict[str, Any] | None = None
+        self._img_hover_rect: Any = None  # QRect for paint handle
 
     def insertFromMimeData(self, source) -> None:  # noqa: N802
         if source is None:
@@ -378,7 +387,137 @@ class _RichEdit(QTextEdit):
                 return
         super().insertFromMimeData(source)
 
+    def _image_natural_size(self, fmt: QTextImageFormat) -> tuple[int, int]:
+        w = int(fmt.width())
+        h = int(fmt.height())
+        if w > 0 and h > 0:
+            return w, h
+        name = (fmt.name() or "").strip()
+        local = QUrl(name).toLocalFile() if name else ""
+        pix = QPixmap(local) if local else QPixmap()
+        if pix.isNull() and name:
+            pix = QPixmap(name)
+        if not pix.isNull():
+            return max(1, pix.width()), max(1, pix.height())
+        return max(1, w or 200), max(1, h or 150)
+
+    def _find_image_fragment_at(self, pos: QPoint) -> tuple[QTextCursor, QTextImageFormat, Any] | None:
+        """Return (cursor_on_image, format, viewport QRect) or None."""
+        cursor = self.cursorForPosition(pos)
+        candidates = [cursor]
+        c_left = QTextCursor(cursor)
+        if c_left.movePosition(QTextCursor.MoveOperation.Left):
+            candidates.append(c_left)
+        for c in candidates:
+            fmt = c.charFormat()
+            if not fmt.isImageFormat():
+                continue
+            img_fmt = fmt.toImageFormat()
+            nw, nh = self._image_natural_size(img_fmt)
+            # Place cursor at image char; cursorRect ≈ top-left of inline object
+            c_img = QTextCursor(c)
+            # Ensure we are on the image character
+            if not c_img.charFormat().isImageFormat():
+                continue
+            top_left = self.cursorRect(c_img).topLeft()
+            rect = QRect(top_left.x(), top_left.y(), int(nw), int(nh))
+            # cursorRect can be narrow; expand using format size
+            if rect.width() < 8:
+                rect.setWidth(int(nw))
+            if rect.height() < 8:
+                rect.setHeight(int(nh))
+            if rect.contains(pos) or rect.adjusted(-4, -4, 4, 4).contains(pos):
+                return c_img, img_fmt, rect
+        return None
+
+    def _hit_resize_handle(self, pos: QPoint) -> dict[str, Any] | None:
+        hit = self._find_image_fragment_at(pos)
+        if not hit:
+            return None
+        cursor, img_fmt, rect = hit
+        handle = rect.adjusted(
+            rect.width() - self._HANDLE, rect.height() - self._HANDLE, 0, 0
+        )
+        # enlarge hit box a bit
+        handle = handle.adjusted(-4, -4, 6, 6)
+        if not handle.contains(pos):
+            # still allow selecting image body for showing handle
+            if rect.contains(pos):
+                self._img_hover_rect = rect
+                self.viewport().update()
+            return None
+        nw, nh = self._image_natural_size(img_fmt)
+        aspect = (nw / nh) if nh else 1.0
+        return {
+            "cursor_pos": cursor.position(),
+            "start_w": float(nw),
+            "start_h": float(nh),
+            "aspect": aspect,
+            "origin": pos,
+            "name": img_fmt.name(),
+        }
+
+    def _apply_image_resize(self, pos: QPoint) -> None:
+        drag = self._img_resize
+        if not drag:
+            return
+        dx = pos.x() - drag["origin"].x()
+        new_w = max(48.0, drag["start_w"] + dx)
+        new_h = max(48.0, new_w / max(0.05, float(drag["aspect"])))
+        # Clamp extreme sizes
+        new_w = min(new_w, 4000.0)
+        new_h = min(new_h, 4000.0)
+        c = self.textCursor()
+        c.setPosition(int(drag["cursor_pos"]))
+        fmt = c.charFormat()
+        if not fmt.isImageFormat():
+            # try left
+            c.movePosition(QTextCursor.MoveOperation.Left)
+            fmt = c.charFormat()
+        if not fmt.isImageFormat():
+            return
+        img = fmt.toImageFormat()
+        if drag.get("name"):
+            img.setName(str(drag["name"]))
+        img.setWidth(new_w)
+        img.setHeight(new_h)
+        # Select the single image character and reapply format
+        c.setPosition(int(drag["cursor_pos"]))
+        if not c.charFormat().isImageFormat():
+            c.movePosition(QTextCursor.MoveOperation.Left)
+        c.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor)
+        if not c.charFormat().isImageFormat():
+            c.setPosition(int(drag["cursor_pos"]))
+            c.movePosition(QTextCursor.MoveOperation.Left, QTextCursor.MoveMode.KeepAnchor)
+        c.mergeCharFormat(img)
+        c.clearSelection()
+        self.setTextCursor(c)
+        # Keep hover rect updated for handle paint
+        hit = self._find_image_fragment_at(pos)
+        self._img_hover_rect = hit[2] if hit else None
+        self.viewport().update()
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if e.button() == Qt.MouseButton.LeftButton and not (
+            e.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            hit = self._hit_resize_handle(e.position().toPoint())
+            if hit:
+                self._img_resize = hit
+                self.viewport().setCursor(Qt.CursorShape.SizeFDiagCursor)
+                e.accept()
+                return
+            # Click on image body → show handle
+            found = self._find_image_fragment_at(e.position().toPoint())
+            self._img_hover_rect = found[2] if found else None
+            self.viewport().update()
+        super().mousePressEvent(e)
+
     def mouseReleaseEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if self._img_resize is not None and e.button() == Qt.MouseButton.LeftButton:
+            self._img_resize = None
+            e.accept()
+            return
         if e.button() == Qt.MouseButton.LeftButton and (
             e.modifiers() & Qt.KeyboardModifier.ControlModifier
         ):
@@ -390,14 +529,60 @@ class _RichEdit(QTextEdit):
         super().mouseReleaseEvent(e)
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:  # noqa: N802
-        anchor = self.anchorAt(e.position().toPoint())
-        if anchor:
-            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-            self.setToolTip(f"Ctrl+单击打开：{anchor}")
+        pos = e.position().toPoint()
+        if self._img_resize is not None:
+            self._apply_image_resize(pos)
+            e.accept()
+            return
+        # Resize handle hover
+        hit = self._hit_resize_handle(pos)
+        if hit:
+            self.viewport().setCursor(Qt.CursorShape.SizeFDiagCursor)
+            self.setToolTip("拖动右下角等比缩放图片")
+            found = self._find_image_fragment_at(pos)
+            self._img_hover_rect = found[2] if found else None
+            self.viewport().update()
+            e.accept()
+            return
+        found = self._find_image_fragment_at(pos)
+        if found:
+            self._img_hover_rect = found[2]
+            self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+            self.setToolTip("拖动图片右下角可等比缩放")
+            self.viewport().update()
         else:
-            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
-            self.setToolTip("Ctrl+单击可打开超链接")
+            if self._img_hover_rect is not None:
+                self._img_hover_rect = None
+                self.viewport().update()
+            anchor = self.anchorAt(pos)
+            if anchor:
+                self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                self.setToolTip(f"Ctrl+单击打开：{anchor}")
+            else:
+                self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                self.setToolTip("Ctrl+单击可打开超链接；图片可拖右下角等比缩放")
         super().mouseMoveEvent(e)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        rect = self._img_hover_rect
+        if rect is None and self._img_resize is None:
+            return
+        r = rect
+        if r is None:
+            return
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # light border around selected/hovered image
+        p.setPen(QPen(QColor("#38bdf8"), 1, Qt.PenStyle.DashLine))
+        p.drawRect(r.adjusted(0, 0, -1, -1))
+        # bottom-right handle
+        hs = 10
+        hr = QRect(r.right() - hs, r.bottom() - hs, hs, hs)
+        p.setBrush(QColor("#38bdf8"))
+        p.setPen(QPen(QColor("#0f172a"), 1))
+        p.drawRect(hr)
+        p.end()
 
 class NotebookWindow(QMainWindow):
     """Three-pane notebook library UI."""
@@ -475,7 +660,7 @@ class NotebookWindow(QMainWindow):
 
         tip = QLabel(
             "与「便签」互不影响 · 点 A▾ / 高亮▾ 选颜色 · 字号可调 · 粘贴网址自动成链接（Ctrl+单击打开）· "
-            "云同步可选（与截图共用 Google 账号，文件夹独立）"
+            "图片可拖右下角等比缩放 · 云同步可选（与截图共用 Google 账号，文件夹独立）"
         )
         tip.setObjectName("muted")
         tip.setWordWrap(True)
@@ -629,9 +814,12 @@ class NotebookWindow(QMainWindow):
         self.btn_highlight.clicked.connect(lambda: self._show_color_palette(True))
         self.toolbar.addWidget(self.btn_highlight)
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(QLabel(" 图宽 "))
+        self.toolbar.addWidget(QLabel(" 压缩 "))
         self.cmb_img_size = QComboBox()
-        self.cmb_img_size.setToolTip("插入/粘贴图片时压缩：最长边像素（减小附件体积）")
+        self.cmb_img_size.setToolTip(
+            "插入/粘贴时的文件压缩上限（最长边）。\n"
+            "插入后可在正文中拖图片右下角，等比缩放显示大小。"
+        )
         self.cmb_img_size.setMinimumWidth(88)
         for edge, label in (
             (800, "800px"),
@@ -644,8 +832,8 @@ class NotebookWindow(QMainWindow):
         self.toolbar.addWidget(self.cmb_img_size)
         for text, tip, slot in (
             ("🔗", "插入/粘贴超链接", self._insert_link_dialog),
-            ("图片", "从文件插入图片（会按「图宽」压缩）", self._insert_image_file),
-            ("附件", "添加附件（图片同样按「图宽」压缩）", self._add_attachment),
+            ("图片", "插入图片：按「压缩」减小体积；正文里可拖右下角等比缩放显示", self._insert_image_file),
+            ("附件", "添加附件（图片同样按「压缩」处理）", self._add_attachment),
         ):
             act = QAction(text, self)
             act.setToolTip(tip)
@@ -1384,7 +1572,21 @@ class NotebookWindow(QMainWindow):
             url = ap.resolve().as_uri()
             if self.tabs.currentIndex() == 0:
                 cursor = self.rich.textCursor()
-                cursor.insertImage(url)
+                fmt = QTextImageFormat()
+                fmt.setName(url)
+                # Initial display width from compress setting (or natural, capped)
+                try:
+                    pix = QPixmap(str(ap))
+                    nat_w = pix.width() if not pix.isNull() else 800
+                    nat_h = pix.height() if not pix.isNull() else 600
+                except Exception:
+                    nat_w, nat_h = 800, 600
+                disp = edge if edge > 0 else min(nat_w, 1280)
+                disp = max(48, min(disp, nat_w if nat_w > 0 else disp))
+                aspect = (nat_w / nat_h) if nat_h else 1.0
+                fmt.setWidth(float(disp))
+                fmt.setHeight(float(disp / max(0.05, aspect)))
+                cursor.insertImage(fmt)
             else:
                 self.md_edit.insertPlainText(f"\n![]({url})\n")
             meta, _ = self.store.get_note(self._current_note_id)

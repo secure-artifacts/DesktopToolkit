@@ -44,3 +44,11 @@ DesktopToolkit-error.log
 # Local release notes / private drafts
 RELEASE-NOTES*.md
 
+
+# Bundled RustDesk binary (download via tools/fetch_rustdesk.py before pack)
+vendor/rustdesk/win/*.exe
+_force_*.py
+_force_*.txt
+_launch_*.txt
+build_log_*.txt
+

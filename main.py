@@ -61,6 +61,7 @@ class ToolkitApp(QObject):
         self.recorder_board = None
         self.p2p_board = None
         self.lan_board = None
+        self.remote_board = None
         self.clean_board = None
         self.alarm_board = None
         self.todo_board = None
@@ -155,11 +156,30 @@ class ToolkitApp(QObject):
             if self.assistant is None:
                 self.assistant = FloatingAssistant(self)
             else:
-                self.assistant.show()
-                self.assistant.raise_()
+                self.assistant.bring_to_front()
         elif self.assistant is not None:
             self.assistant.menu.hide()
             self.assistant.hide()
+
+    def bring_float_assistant_front(self) -> None:
+        """Tray: ensure floating robot is visible and topmost."""
+        self._prefs()["float_assistant"] = True
+        try:
+            self.store.save_state()
+        except Exception:
+            pass
+        if self.assistant is None:
+            self.assistant = FloatingAssistant(self)
+        else:
+            self.assistant.bring_to_front()
+        # Keep prefs checkbox in sync if hub is open
+        try:
+            if self.main_win and hasattr(self.main_win, "chk_float_logo"):
+                self.main_win.chk_float_logo.blockSignals(True)
+                self.main_win.chk_float_logo.setChecked(True)
+                self.main_win.chk_float_logo.blockSignals(False)
+        except Exception:
+            pass
 
     def _make_tray(self) -> QSystemTrayIcon:
         logo = bundle_root() / "logo.png"
@@ -168,10 +188,12 @@ class ToolkitApp(QObject):
         menu = QMenu()
         for text, fn in (
             ("打开主界面 (Ctrl+Alt+T)", self.show_hub),
+            ("找回悬浮机器人", self.bring_float_assistant_front),
             ("区域截图", self.start_screenshot_region),
             ("录屏", self.show_recorder_board),
             ("跨网传文件", self.show_p2p_board),
             ("局域网共享", self.show_lan_share),
+            ("远程控制", self.show_remote_control),
             ("待办", self.show_todos),
             ("便签", self.show_notes),
             ("笔记本", self.show_notebook),
@@ -209,27 +231,43 @@ class ToolkitApp(QObject):
             w = self.main_win
             if w.isMinimized():
                 w.showNormal()
-            # Clamp on-screen in case geometry was saved off-monitor
+            # Always pin to primary screen (dual-monitor / off-screen recovery)
             try:
                 from PyQt6.QtGui import QGuiApplication
 
                 scr = QGuiApplication.primaryScreen()
                 if scr:
                     g = scr.availableGeometry()
-                    if not g.intersects(w.frameGeometry()):
-                        w.move(g.center().x() - w.width() // 2, g.center().y() - w.height() // 2)
+                    if (not g.intersects(w.frameGeometry())) or w.width() < 200:
+                        w.resize(max(1040, w.width()), max(700, w.height()))
+                        w.move(g.left() + 60, g.top() + 40)
             except Exception:
                 pass
             w.show()
+            w.showNormal()
             w.raise_()
             w.activateWindow()
-            # Windows: Tool-type float windows can steal z-order; force foreground
+            # Windows: restore + brief TOPMOST so hub isn't trapped under
+            # maximized Teams / VS Code / etc., then drop topmost shortly.
             try:
                 if sys.platform == "win32":
                     import ctypes
 
                     hwnd = int(w.winId())
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    u32 = ctypes.windll.user32
+                    u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    u32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
+                    u32.SetForegroundWindow(hwnd)
+
+                    def _drop_topmost() -> None:
+                        try:
+                            u32.SetWindowPos(
+                                hwnd, -2, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040
+                            )  # HWND_NOTOPMOST
+                        except Exception:
+                            pass
+
+                    QTimer.singleShot(12000, _drop_topmost)
             except Exception:
                 pass
         except Exception as e:
@@ -378,6 +416,26 @@ class ToolkitApp(QObject):
         self.lan_board.show()
         self.lan_board.raise_()
         self.lan_board._refresh_status()
+
+    def show_remote_control(self) -> None:
+        """Open remote control in hub when possible; else floating board."""
+        try:
+            self.show_hub()
+            if self.main_win is not None:
+                self.main_win.goto_transfer("remote")
+                return
+        except Exception:
+            pass
+        from remote_ui import FloatingRemoteBoard
+
+        if self.remote_board is None:
+            self.remote_board = FloatingRemoteBoard(self)
+        self.remote_board.show()
+        self.remote_board.raise_()
+        try:
+            self.remote_board.refresh()
+        except Exception:
+            pass
 
     def start_deep_clean(self, scopes: list[str] | None = None) -> None:
         if self._cleaning:
@@ -568,11 +626,49 @@ def main() -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
     app.setApplicationName("Desktop Toolkit")
+    # Single-instance: a second launch just activates the first
+    try:
+        from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+
+        key = "DesktopToolkit-single-instance"
+        probe = QLocalSocket()
+        probe.connectToServer(key)
+        if probe.waitForConnected(200):
+            probe.write(b"raise")
+            probe.waitForBytesWritten(500)
+            probe.disconnectFromServer()
+            return 0
+        try:
+            QLocalServer.removeServer(key)
+        except Exception:
+            pass
+        server = QLocalServer()
+        server.listen(key)
+        app._toolkit_instance_server = server  # type: ignore[attr-defined]
+    except Exception:
+        server = None  # type: ignore[assignment]
+
     logo = bundle_root() / "logo.png"
     if logo.exists():
         app.setWindowIcon(QIcon(str(logo)))
     try:
-        ToolkitApp(app)
+        host = ToolkitApp(app)
+        if server is not None:
+
+            def _on_second_instance() -> None:
+                try:
+                    sock = server.nextPendingConnection()
+                    if sock:
+                        sock.readAll()
+                        sock.disconnectFromServer()
+                except Exception:
+                    pass
+                try:
+                    host.show_hub()
+                except Exception:
+                    pass
+
+            server.newConnection.connect(_on_second_instance)
     except Exception as exc:
         traceback.print_exc()
         QMessageBox.critical(None, "Desktop Toolkit", f"启动失败：{exc}")

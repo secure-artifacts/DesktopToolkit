@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from skin import bundle_root
+from win_topmost import force_topmost
 
 
 def robot_icon_path() -> Path:
@@ -125,6 +126,7 @@ class FloatingAssistant(QWidget):
             ("便签", self._act_notes),
             ("笔记本", self._act_notebook),
             ("文件整理", self._act_organize),
+            ("远程控制", self._act_remote),
             ("番茄钟", self._act_pomo),
             ("闹钟", self._act_alarm),
             ("天气播报", self._act_weather),
@@ -146,8 +148,34 @@ class FloatingAssistant(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self._maybe_hide_menu)
 
+        # Other always-on-top windows can steal z-order; reassert gently.
+        # Never while dragging — SetWindowPos would interrupt mouse move.
+        self._topmost_timer = QTimer(self)
+        self._topmost_timer.setTimerType(Qt.TimerType.CoarseTimer)
+        self._topmost_timer.timeout.connect(self._reassert_topmost)
+        self._topmost_timer.start(2500)
+
         self._restore_or_place()
         self.show()
+        QTimer.singleShot(0, self._reassert_topmost)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not self._drag:
+            QTimer.singleShot(0, self._reassert_topmost)
+
+    def _reassert_topmost(self) -> None:
+        if self._drag:
+            return
+        force_topmost(self)
+        if self.menu.isVisible():
+            force_topmost(self.menu)
+
+    def bring_to_front(self) -> None:
+        """Tray / prefs: show logo and force it above other windows."""
+        self.show()
+        self.raise_()
+        self._reassert_topmost()
 
     def _prefs(self) -> dict:
         try:
@@ -227,6 +255,8 @@ class FloatingAssistant(QWidget):
         self._position_menu()
         self.menu.show()
         self.menu.raise_()
+        force_topmost(self)
+        force_topmost(self.menu)
         self._menu_visible = True
         # Keep menu open while cursor is on menu
         self.menu.enterEvent = lambda e: self._hide_timer.stop()  # type: ignore
@@ -245,13 +275,14 @@ class FloatingAssistant(QWidget):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag = True
             self._drag_offset = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            self._show_menu()
+            # Hide menu while dragging so it doesn't steal mouse moves
+            self.menu.hide()
+            self._menu_visible = False
+            self._hide_timer.stop()
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:
         if self._drag and e.buttons() & Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_offset)
-            if self.menu.isVisible():
-                self._position_menu()
 
     def mouseReleaseEvent(self, e: QMouseEvent) -> None:
         if self._drag:
@@ -259,6 +290,11 @@ class FloatingAssistant(QWidget):
             p = self._clamp_to_screens(self.x(), self.y())
             self.move(p)
             self._save_pos()
+            self._drag = False
+            self._reassert_topmost()
+            # Re-open hover menu after a finished drag if cursor still on logo
+            if self.frameGeometry().contains(QCursor.pos()):
+                self._show_menu()
         self._drag = False
 
     def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:
@@ -293,6 +329,14 @@ class FloatingAssistant(QWidget):
         self._tip("打开文件整理")
         try:
             self.host.show_file_organizer()
+        except Exception:
+            pass
+        self.menu.hide()
+
+    def _act_remote(self) -> None:
+        self._tip("打开远程控制")
+        try:
+            self.host.show_remote_control()
         except Exception:
             pass
         self.menu.hide()

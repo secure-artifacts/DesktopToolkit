@@ -10,6 +10,7 @@ a = Analysis(
         ("logo.ico", "."),
         ("cloudflare", "cloudflare"),
         ("VERSION", "."),
+        ("vendor/rustdesk", "vendor/rustdesk"),
     ],
     hiddenimports=[
         "screenshot_app",
@@ -41,6 +42,9 @@ a = Analysis(
         "hotkeys",
         "hub_ui",
         "float_assistant",
+        "win_topmost",
+        "rustdesk_bridge",
+        "remote_ui",
         "voice",
         "autostart",
         "weather",
