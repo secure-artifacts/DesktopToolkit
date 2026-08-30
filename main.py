@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import QObject, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QGuiApplication, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from cleaner import CleanReport, DEFAULT_SCOPES, run_deep_clean_async
@@ -215,8 +215,48 @@ class ToolkitApp(QObject):
         return tray
 
     def _tray_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+        # Double-click or single left-click both open hub (many users single-click)
+        if reason in (
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+            QSystemTrayIcon.ActivationReason.Trigger,
+        ):
             self.show_hub()
+
+    def _hub_target_geometry(self) -> QRect:
+        """Primary-screen rect for the main window (never rely on a broken native size)."""
+        scr = QGuiApplication.primaryScreen()
+        if scr:
+            g = scr.availableGeometry()
+            w = min(1120, max(960, g.width() - 80))
+            h = min(760, max(620, g.height() - 80))
+            return QRect(g.left() + 60, g.top() + 40, w, h)
+        return QRect(60, 40, 1040, 700)
+
+    def _force_hub_geometry(self, w) -> None:
+        """Apply a sane on-screen geometry; fixes 150×39 / hidden ghost windows."""
+        try:
+            target = self._hub_target_geometry()
+            fg = w.frameGeometry()
+            tiny = (
+                w.width() < 400
+                or w.height() < 300
+                or fg.width() < 400
+                or fg.height() < 300
+            )
+            scr = QGuiApplication.primaryScreen()
+            on_screen = bool(scr and scr.availableGeometry().intersects(fg)) if fg.width() > 0 else False
+            # Always place when size is broken / off-screen / never mapped (0×0)
+            if tiny or not on_screen:
+                w.setMinimumSize(900, 560)
+                w.resize(target.width(), target.height())
+                w.move(target.x(), target.y())
+                w.setGeometry(target)
+        except Exception:
+            try:
+                w.resize(1040, 700)
+                w.move(60, 40)
+            except Exception:
+                pass
 
     def show_hub(self) -> None:
         """Open / restore the main window in front of floating tools."""
@@ -231,42 +271,70 @@ class ToolkitApp(QObject):
             w = self.main_win
             if w.isMinimized():
                 w.showNormal()
-            # Always pin to primary screen (dual-monitor / off-screen recovery)
-            try:
-                from PyQt6.QtGui import QGuiApplication
 
-                scr = QGuiApplication.primaryScreen()
-                if scr:
-                    g = scr.availableGeometry()
-                    if (not g.intersects(w.frameGeometry())) or w.width() < 200:
-                        w.resize(max(1040, w.width()), max(700, w.height()))
-                        w.move(g.left() + 60, g.top() + 40)
-            except Exception:
-                pass
+            self._force_hub_geometry(w)
+            w.setWindowState(w.windowState() & ~Qt.WindowState.WindowMinimized)
             w.show()
             w.showNormal()
+            self._force_hub_geometry(w)
             w.raise_()
             w.activateWindow()
-            # Windows: restore + brief TOPMOST so hub isn't trapped under
-            # maximized Teams / VS Code / etc., then drop topmost shortly.
+
+            # Windows: restore with EXPLICIT size (do not use SWP_NOSIZE — that can
+            # lock a broken ~150×39 native HWND created before layout finishes).
             try:
                 if sys.platform == "win32":
                     import ctypes
 
                     hwnd = int(w.winId())
                     u32 = ctypes.windll.user32
+                    target = self._hub_target_geometry()
                     u32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    u32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
+                    # HWND_TOPMOST, set pos+size+show (no NOSIZE/NOMOVE)
+                    u32.SetWindowPos(
+                        hwnd,
+                        -1,
+                        int(target.x()),
+                        int(target.y()),
+                        int(target.width()),
+                        int(target.height()),
+                        0x0040,  # SWP_SHOWWINDOW
+                    )
                     u32.SetForegroundWindow(hwnd)
 
                     def _drop_topmost() -> None:
                         try:
                             u32.SetWindowPos(
                                 hwnd, -2, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040
-                            )  # HWND_NOTOPMOST
+                            )  # HWND_NOTOPMOST + NOSIZE/NOMOVE
                         except Exception:
                             pass
 
+                    def _reassert() -> None:
+                        try:
+                            if self.main_win is None:
+                                return
+                            mw = self.main_win
+                            if mw.width() < 400 or mw.height() < 300 or not mw.isVisible():
+                                self._force_hub_geometry(mw)
+                                mw.show()
+                                mw.showNormal()
+                                mw.raise_()
+                                t2 = self._hub_target_geometry()
+                                u32.SetWindowPos(
+                                    int(mw.winId()),
+                                    -1,
+                                    int(t2.x()),
+                                    int(t2.y()),
+                                    int(t2.width()),
+                                    int(t2.height()),
+                                    0x0040,
+                                )
+                        except Exception:
+                            pass
+
+                    QTimer.singleShot(80, _reassert)
+                    QTimer.singleShot(400, _reassert)
                     QTimer.singleShot(12000, _drop_topmost)
             except Exception:
                 pass

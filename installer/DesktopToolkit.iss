@@ -1,8 +1,8 @@
-﻿; Desktop Toolkit 鈥?Windows installer (Inno Setup 6)
+; Desktop Toolkit 鈥?Windows installer (Inno Setup 6)
 ; Builds a double-click Setup.exe from dist\DesktopToolkit\
 
 #define MyAppName "Desktop Toolkit"
-#define MyAppVersion "1.7.3"
+#define MyAppVersion "1.7.4"
 #define MyAppPublisher "Desktop Toolkit"
 #define MyAppURL "https://github.com/secure-artifacts/DesktopToolkit"
 #define MyAppExeName "DesktopToolkit.exe"
