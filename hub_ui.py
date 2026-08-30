@@ -1187,7 +1187,16 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle("更新")
         box.setIcon(QMessageBox.Icon.Information)
-        box.setText("安装程序已启动。\n为避免文件占用，建议现在退出 Desktop Toolkit。")
+        import sys as _sys
+
+        if _sys.platform == "darwin":
+            box.setText(
+                "Mac 安装包已打开/安装。\n"
+                "若是 DMG：请把 DesktopToolkit 拖进「应用程序」，然后退出旧版再打开新版。\n"
+                "若已自动复制到「应用程序」：请退出本软件后从启动台打开新版本。"
+            )
+        else:
+            box.setText("安装程序已启动。\n为避免文件占用，建议现在退出 Desktop Toolkit。")
         box.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
@@ -1225,26 +1234,41 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("发现新版本")
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(result.message)
-        has_setup = bool(self._last_download_url) and (
-            self._last_download_url.lower().endswith(".exe")
-            or "setup" in (self._last_asset_name or "").lower()
+        dl = (self._last_download_url or "").lower()
+        an = (self._last_asset_name or "").lower()
+        import sys as _sys
+
+        is_mac = _sys.platform == "darwin"
+        has_package = bool(self._last_download_url) and (
+            dl.endswith(".exe")
+            or dl.endswith(".dmg")
+            or dl.endswith(".zip")
+            or "setup" in an
+            or "macos" in an
         )
-        if has_setup:
+        if has_package and is_mac:
+            box.setInformativeText(
+                "是否下载并安装？\n"
+                "· DMG：打开后把 DesktopToolkit 拖进「应用程序」\n"
+                "· ZIP：会尝试自动复制到「应用程序」\n"
+                "（安装前建议先保存工作）"
+            )
+        elif has_package:
             box.setInformativeText(
                 "是否下载安装包并启动安装程序？\n"
                 "（安装前建议先保存工作；安装程序启动后可关闭本软件）"
             )
         else:
             box.setInformativeText(
-                "未找到 setup 安装包链接，可打开下载页手动下载。"
+                "未找到本平台安装包链接，可打开下载页手动下载。"
             )
         btn_install = box.addButton("下载并安装", QMessageBox.ButtonRole.AcceptRole)
         btn_page = box.addButton("打开下载页", QMessageBox.ButtonRole.ActionRole)
         box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(btn_install if has_setup else btn_page)
+        box.setDefaultButton(btn_install if has_package else btn_page)
         box.exec()
         clicked = box.clickedButton()
-        if clicked is btn_install and has_setup:
+        if clicked is btn_install and has_package:
             self._download_and_install()
         elif clicked is btn_page:
             self._open_release_page()

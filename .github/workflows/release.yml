@@ -145,6 +145,7 @@ jobs:
           ./build_mac.sh
           mkdir -p release-assets
           ZIP="dist/release/DesktopToolkit-${VERSION}-macos.zip"
+          DMG="dist/release/DesktopToolkit-${VERSION}-macos.dmg"
           if [[ ! -f "$ZIP" ]]; then
             echo "Looking for app bundle…"
             find dist -maxdepth 3 -name "*.app" -type d || true
@@ -167,6 +168,14 @@ jobs:
           cp -f "${ZIP}.sha256" "release-assets/" 2>/dev/null || \
             shasum -a 256 "release-assets/DesktopToolkit-${VERSION}-macos.zip" | awk '{print $1}' > \
               "release-assets/DesktopToolkit-${VERSION}-macos.zip.sha256"
+          if [[ -f "$DMG" ]]; then
+            cp -f "$DMG" "release-assets/"
+            cp -f "${DMG}.sha256" "release-assets/" 2>/dev/null || \
+              shasum -a 256 "release-assets/DesktopToolkit-${VERSION}-macos.dmg" | awk '{print $1}' > \
+                "release-assets/DesktopToolkit-${VERSION}-macos.dmg.sha256"
+          else
+            echo "WARNING: DMG not found (zip still published)"
+          fi
           ls -la release-assets
 
       - name: Upload macOS artifacts

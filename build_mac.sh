@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Build Desktop Toolkit .app on macOS (Apple Silicon or Intel).
-# Usage (from repo root on a Mac):
+# Outputs:
+#   dist/release/DesktopToolkit-<ver>-macos.zip
+#   dist/release/DesktopToolkit-<ver>-macos.dmg   (drag .app into Applications)
+# Usage (from repo root on a Mac / CI):
 #   chmod +x build_mac.sh
 #   ./build_mac.sh
 set -euo pipefail
@@ -9,7 +12,7 @@ VER="$(tr -d ' \r\n' < VERSION)"
 echo "Building DesktopToolkit ${VER} for macOS…"
 
 python3 -m pip install -r requirements.txt pyinstaller --quiet
-rm -rf build/mac dist/DesktopToolkit.app dist/DesktopToolkit
+rm -rf build/mac dist/DesktopToolkit.app dist/DesktopToolkit dist/dmg_stage
 
 python3 -m PyInstaller --noconfirm --windowed --name DesktopToolkit \
   --icon logo.ico \
@@ -50,22 +53,38 @@ if [[ ! -d "$APP" ]]; then
     APP="dist/DesktopToolkit/DesktopToolkit.app"
   fi
 fi
-ZIP="$OUT/DesktopToolkit-${VER}-macos.zip"
-rm -f "$ZIP"
-if [[ -d "$APP" ]]; then
-  ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-  shasum -a 256 "$ZIP" | awk '{print $1}' > "${ZIP}.sha256"
-  echo "OK: $ZIP"
-else
+if [[ ! -d "$APP" ]]; then
   echo "WARNING: .app not found — check dist/ and run PyInstaller output"
   ls -la dist || true
   exit 1
 fi
 
+ZIP="$OUT/DesktopToolkit-${VER}-macos.zip"
+rm -f "$ZIP"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+shasum -a 256 "$ZIP" | awk '{print $1}' > "${ZIP}.sha256"
+echo "OK: $ZIP"
+
+# DMG like RustDesk: open disk image → drag DesktopToolkit.app into Applications
+DMG="$OUT/DesktopToolkit-${VER}-macos.dmg"
+STAGE="dist/dmg_stage"
+rm -rf "$STAGE" "$DMG"
+mkdir -p "$STAGE"
+ditto "$APP" "$STAGE/DesktopToolkit.app"
+ln -s /Applications "$STAGE/Applications"
+# UDZO = compressed read-only DMG
+hdiutil create -volname "Desktop Toolkit ${VER}" \
+  -srcfolder "$STAGE" \
+  -ov -format UDZO \
+  "$DMG"
+shasum -a 256 "$DMG" | awk '{print $1}' > "${DMG}.sha256"
+rm -rf "$STAGE"
+echo "OK: $DMG"
+
 echo ""
-echo "macOS notes:"
-echo "  - Screen/window capture permissions: System Settings → Privacy → Screen Recording"
-echo "  - Window-specific capture is limited vs Windows; full/region screen works via mss"
-echo "  - Autostart: in-app toggle writes LaunchAgent com.desktoptoolkit.autostart"
-echo "  - Cleaner scopes are macOS-specific (Safari/Chrome caches, trash, logs, Xcode)"
-echo "  - Remote control: install RustDesk from https://rustdesk.com if not already present"
+echo "macOS install:"
+echo "  - Preferred: open the .dmg, drag DesktopToolkit.app into Applications"
+echo "  - Or unzip the .zip and drag DesktopToolkit.app into Applications"
+echo "  - First launch (unsigned): right-click → Open, or System Settings → Privacy → allow"
+echo "  - Screen Recording permission may be required for screenshots/recorder"
+echo "  - Remote control: install RustDesk from https://rustdesk.com if needed"

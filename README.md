@@ -56,14 +56,17 @@ chmod +x build_mac.sh
 ```
 
 GitHub：推送 `v*` 标签或在 Actions 里手动运行 **Build and Release**（可指定 tag）。  
-`macos-14` runner 会打出 `DesktopToolkit-<ver>-macos.zip` 并挂到该 Release。
+`macos-14` runner 会打出：
+- `DesktopToolkit-<ver>-macos.dmg`（推荐：打开后拖进「应用程序」，类似 RustDesk）
+- `DesktopToolkit-<ver>-macos.zip`（解压后把 `.app` 拖进「应用程序」）
 
-产物：Windows 见 `dist/release/`；macOS 见 `dist/release/DesktopToolkit-*-macos.zip`。
+产物：Windows 见 `dist/release/`；macOS 见 `dist/release/DesktopToolkit-*-macos.{dmg,zip}`。
 
 ## 使用说明
 
-- 安装包：双击 `*-windows-setup.exe` 安装后使用
-- 便携包：解压 zip，运行 `DesktopToolkit.exe`
+- Windows 安装包：双击 `*-windows-setup.exe` 安装后使用
+- Windows 便携包：解压 zip，运行 `DesktopToolkit.exe`
+- macOS：下载 `.dmg` → 打开 → 把 `DesktopToolkit.app` 拖到「应用程序」；首次运行若提示未验证开发者，可右键「打开」
 - 跨网传文件：双方填写同一中转地址与房间号；建议接收方先点「等待接收」，再由发送方发送文件
 
 ## License
