@@ -145,11 +145,11 @@ class MainWindow(QMainWindow):
                 self._nav_btns[key] = b
         sl.addStretch(1)
         try:
-            from updater import APP_VERSION as _VER
+            from updater import get_app_version
 
-            ver = QLabel(f"v{_VER}")
+            ver = QLabel(f"v{get_app_version()}")
         except Exception:
-            ver = QLabel(f"v{_VER}")
+            ver = QLabel("v?")
         ver.setObjectName("muted")
         sl.addWidget(ver)
         outer.addWidget(side)
@@ -1007,14 +1007,21 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(QLabel("版本与更新", objectName="section"))
         try:
-            from updater import APP_VERSION
+            from updater import get_app_version
 
-            ver_txt = APP_VERSION
+            ver_txt = get_app_version()
         except Exception:
-            ver_txt = "1.5.0"
+            ver_txt = "?"
         self.lbl_app_version = QLabel(f"当前版本：v{ver_txt}")
         self.lbl_app_version.setObjectName("muted")
         lay.addWidget(self.lbl_app_version)
+        tip_ver = QLabel(
+            "若这里不是最新版，请先卸载旧版或关掉托盘里旧进程，"
+            "再从 GitHub Latest 安装包覆盖安装。"
+        )
+        tip_ver.setObjectName("muted")
+        tip_ver.setWordWrap(True)
+        lay.addWidget(tip_ver)
         self.chk_auto_update = QCheckBox("启动时自动检查更新（有新版本会提示）")
         self.chk_auto_update.setChecked(bool(self._prefs().get("auto_check_update", True)))
         self.chk_auto_update.toggled.connect(self._on_auto_update)
@@ -1022,9 +1029,9 @@ class MainWindow(QMainWindow):
         upd_row = QHBoxLayout()
         self.btn_check_update = QPushButton("检查更新", objectName="primary")
         self.btn_check_update.clicked.connect(self._check_update)
-        self.btn_open_release = QPushButton("打开下载页", objectName="soft")
-        self.btn_open_release.setEnabled(False)
-        self.btn_open_release.clicked.connect(self._open_release_page)
+        self.btn_open_release = QPushButton("打开最新下载页", objectName="soft")
+        self.btn_open_release.setEnabled(True)
+        self.btn_open_release.clicked.connect(self._open_latest_download)
         upd_row.addWidget(self.btn_check_update)
         upd_row.addWidget(self.btn_open_release)
         upd_row.addStretch(1)
@@ -1271,15 +1278,22 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _open_latest_download(self) -> None:
+        """Always open GitHub /releases/latest (not a stale cached URL)."""
+        try:
+            from updater import RELEASES_PAGE
+
+            QDesktopServices.openUrl(QUrl(RELEASES_PAGE))
+        except Exception:
+            QDesktopServices.openUrl(
+                QUrl("https://github.com/secure-artifacts/DesktopToolkit/releases/latest")
+            )
+
     def _open_release_page(self) -> None:
         url = self._last_release_url
         if not url:
-            try:
-                from updater import RELEASES_PAGE
-
-                url = RELEASES_PAGE
-            except Exception:
-                return
+            self._open_latest_download()
+            return
         QDesktopServices.openUrl(QUrl(url))
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]

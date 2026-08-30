@@ -1,4 +1,4 @@
-﻿"""Check for application updates from GitHub Releases; optional download + run installer."""
+"""Check for application updates from GitHub Releases; optional download + run installer."""
 
 from __future__ import annotations
 
@@ -12,13 +12,28 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-# Bump when shipping a new installer.
+# Bump when shipping a new installer (keep in sync with VERSION file).
 APP_VERSION = "1.7.1"
 
-# Public releases channel (organization repo 鈥?no personal account)
+# Public releases channel (organization repo)
 GITHUB_REPO = "secure-artifacts/DesktopToolkit"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+
+
+def get_app_version() -> str:
+    """Prefer packaged VERSION file, then APP_VERSION constant."""
+    try:
+        from skin import bundle_root
+
+        vf = bundle_root() / "VERSION"
+        if vf.is_file():
+            text = vf.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                return text
+    except Exception:
+        pass
+    return APP_VERSION
 
 
 @dataclass
@@ -42,10 +57,10 @@ def _normalize_version(text: str) -> tuple[int, ...]:
 
 def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
     """Query GitHub latest release. Network failures return ok=False (no crash)."""
-    current = APP_VERSION
+    current = get_app_version()
     headers = {
         "Accept": "application/vnd.github+json",
-        "User-Agent": f"DesktopToolkit/{APP_VERSION}",
+        "User-Agent": f"DesktopToolkit/{current}",
     }
     try:
         req = urllib.request.Request(RELEASES_API, headers=headers)
@@ -64,24 +79,37 @@ def check_for_update(timeout: float = 8.0) -> UpdateCheckResult:
     tag = str(payload.get("tag_name") or payload.get("name") or "").strip()
     latest = tag.lstrip("vV")
     html_url = str(payload.get("html_url") or RELEASES_PAGE)
-    # Prefer setup.exe, then portable zip, then any asset
+    # Prefer platform-matching assets (Mac must not pick Windows setup.exe)
     download = ""
     asset_name = ""
     candidates: list[tuple[int, str, str]] = []
+    is_mac = sys.platform == "darwin"
+    is_win = sys.platform.startswith("win")
     for asset in payload.get("assets") or []:
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
         if not url:
             continue
         low = name.lower()
-        if "setup" in low and low.endswith(".exe"):
-            candidates.append((0, url, name))
-        elif low.endswith(".exe"):
-            candidates.append((1, url, name))
-        elif "portable" in low and low.endswith(".zip"):
-            candidates.append((2, url, name))
-        elif low.endswith(".zip") or low.endswith(".7z"):
-            candidates.append((3, url, name))
+        if is_mac:
+            if "macos" in low and low.endswith(".zip"):
+                candidates.append((0, url, name))
+            elif low.endswith(".dmg"):
+                candidates.append((1, url, name))
+            elif low.endswith(".zip") and "windows" not in low and "win" not in low:
+                candidates.append((2, url, name))
+        elif is_win:
+            if "setup" in low and low.endswith(".exe"):
+                candidates.append((0, url, name))
+            elif low.endswith(".exe"):
+                candidates.append((1, url, name))
+            elif "portable" in low and low.endswith(".zip"):
+                candidates.append((2, url, name))
+            elif low.endswith(".zip") or low.endswith(".7z"):
+                candidates.append((3, url, name))
+        else:
+            if low.endswith(".zip") or low.endswith(".7z") or low.endswith(".exe"):
+                candidates.append((5, url, name))
     if candidates:
         candidates.sort(key=lambda x: x[0])
         download, asset_name = candidates[0][1], candidates[0][2]
