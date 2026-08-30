@@ -17,11 +17,13 @@ Protocol (JSON text frames + binary frames):
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import secrets
+import tempfile
 import threading
+import time
+import zipfile
 from pathlib import Path
 from typing import Callable
 
@@ -44,6 +46,57 @@ FREE_DAILY_REQUEST_LIMIT = 100_000
 def make_room_code(n: int = 6) -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "".join(secrets.choice(alphabet) for _ in range(n))
+
+
+def prepare_send_payload(
+    paths: list[str | Path],
+) -> tuple[Path, str, bool, Path | None]:
+    """Build a single file to send.
+
+    Returns (path, display_name, is_temp, temp_dir_to_cleanup).
+    - One regular file → send as-is
+    - Multiple files and/or folders → zip into a temp archive (bundle=true)
+    """
+    cleaned: list[Path] = []
+    for raw in paths:
+        p = Path(raw)
+        if p.exists():
+            cleaned.append(p.resolve())
+    if not cleaned:
+        raise FileNotFoundError("未选择任何有效文件或文件夹")
+
+    if len(cleaned) == 1 and cleaned[0].is_file():
+        return cleaned[0], cleaned[0].name, False, None
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="toolkit_p2p_"))
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    if len(cleaned) == 1 and cleaned[0].is_dir():
+        zip_name = f"{cleaned[0].name}_{stamp}.zip"
+    else:
+        zip_name = f"p2p_bundle_{stamp}.zip"
+    zip_path = tmp_root / zip_name
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        used: set[str] = set()
+        for root in cleaned:
+            if root.is_file():
+                arc = root.name
+                if arc in used:
+                    arc = f"{root.parent.name}_{root.name}"
+                used.add(arc)
+                zf.write(root, arcname=arc)
+            elif root.is_dir():
+                for fp in root.rglob("*"):
+                    if not fp.is_file():
+                        continue
+                    arc = str(Path(root.name) / fp.relative_to(root)).replace("\\", "/")
+                    # rare collision across two folders with same name
+                    if arc in used:
+                        arc = f"{root.parent.name}_{arc}"
+                    used.add(arc)
+                    zf.write(fp, arcname=arc)
+
+    return zip_path, zip_name, True, tmp_root
 
 
 def normalize_ws_url(url: str, room: str) -> str:
@@ -200,17 +253,47 @@ class P2PSession:
         self._thread = threading.Thread(target=self._send_file, args=(Path(path),), daemon=True)
         self._thread.start()
 
+    def send_paths_async(self, paths: list[str | Path]) -> None:
+        """Send one file, many files, and/or folders (folders/multi → zip bundle)."""
+        self._thread = threading.Thread(target=self._send_paths, args=(list(paths),), daemon=True)
+        self._thread.start()
+
     def receive_file_async(self, dest_dir: str | Path) -> None:
         self._thread = threading.Thread(target=self._recv_file, args=(Path(dest_dir),), daemon=True)
         self._thread.start()
 
-    def _send_file(self, path: Path) -> None:
+    def _send_paths(self, paths: list[str | Path]) -> None:
+        tmp_dir: Path | None = None
+        try:
+            path, display_name, _is_temp, tmp_dir = prepare_send_payload(paths)
+            if _is_temp:
+                self.on_status(f"正在打包 {display_name} …")
+            self._send_file(path, display_name=display_name, is_bundle=_is_temp)
+        except Exception as exc:
+            self.on_status(f"准备发送失败：{exc}")
+        finally:
+            if tmp_dir is not None:
+                try:
+                    import shutil
+
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+    def _send_file(
+        self,
+        path: Path,
+        *,
+        display_name: str | None = None,
+        is_bundle: bool = False,
+    ) -> None:
         if ws_connect is None:
             self.on_status("缺少 websockets 库，请 pip install websockets")
             return
         if not path.is_file():
             self.on_status("文件不存在")
             return
+        name = display_name or path.name
         url = normalize_ws_url(self.signal_url, self.room)
         size = path.stat().st_size
         total = max(1, (size + CHUNK - 1) // CHUNK)
@@ -218,13 +301,14 @@ class P2PSession:
         self.on_status(f"连接中转… 房间 {self.room}")
         try:
             with ws_connect(url, open_timeout=20, max_size=CHUNK * 4) as ws:
-                hello = json.dumps({"type": "hello", "role": "send", "name": path.name})
+                hello = json.dumps({"type": "hello", "role": "send", "name": name})
                 offer = json.dumps(
                     {
                         "type": "offer",
-                        "name": path.name,
+                        "name": name,
                         "size": size,
                         "chunks": total,
+                        "bundle": bool(is_bundle),
                     }
                 )
                 ws.send(hello)
@@ -288,7 +372,8 @@ class P2PSession:
                     )
                     return
 
-                self.on_status(f"开始发送 {path.name} ({size} 字节)")
+                kind = "压缩包" if is_bundle else "文件"
+                self.on_status(f"开始发送{kind} {name} ({size} 字节)")
                 with path.open("rb") as f:
                     for i in range(total):
                         if self._stop.is_set():
@@ -299,9 +384,9 @@ class P2PSession:
                         meta = json.dumps({"type": "chunk", "index": i, "total": total, "n": len(chunk)})
                         ws.send(meta)
                         ws.send(chunk)
-                        self.on_progress(i + 1, total, path.name)
+                        self.on_progress(i + 1, total, name)
                 ws.send(json.dumps({"type": "done", "sha1": sha.hexdigest()}))
-                self.on_status(f"✅ 发送完成：{path.name}")
+                self.on_status(f"✅ 发送完成：{name}")
         except Exception as exc:
             err = str(exc)
             if "timed out" in err.lower() or "timeout" in err.lower():
@@ -375,6 +460,7 @@ class P2PSession:
                 name = Path(str(offer.get("name") or "received.bin")).name
                 size = int(offer.get("size") or 0)
                 total = int(offer.get("chunks") or 1)
+                is_bundle = bool(offer.get("bundle"))
                 self.on_status(f"对方要发送：{name} ({size} 字节)，开始接收…")
                 ws.send(json.dumps({"type": "accept"}))
 
@@ -425,7 +511,27 @@ class P2PSession:
                         sha.update(blob)
                         idx_expect = int(meta.get("index") or idx_expect) + 1
                         self.on_progress(idx_expect, total, name)
-                self.on_status(f"✅ 已保存：{out_path}")
+                if is_bundle and out_path.suffix.lower() == ".zip":
+                    extract_dir = dest_dir / out_path.stem
+                    n = 1
+                    while extract_dir.exists():
+                        extract_dir = dest_dir / f"{out_path.stem}_{n}"
+                        n += 1
+                    try:
+                        extract_dir.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(out_path, "r") as zf:
+                            zf.extractall(extract_dir)
+                        self.on_status(
+                            f"✅ 已保存压缩包：{out_path}\n"
+                            f"✅ 已自动解压到：{extract_dir}"
+                        )
+                    except Exception as exc:
+                        self.on_status(
+                            f"✅ 已保存：{out_path}\n"
+                            f"（自动解压失败：{exc}，请手动解压）"
+                        )
+                else:
+                    self.on_status(f"✅ 已保存：{out_path}")
         except Exception as exc:
             err = str(exc)
             if "timed out" in err.lower() or "timeout" in err.lower():

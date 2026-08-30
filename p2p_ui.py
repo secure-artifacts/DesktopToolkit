@@ -197,12 +197,17 @@ class FloatingP2PBoard(QWidget):
 
         act = QHBoxLayout()
         self.btn_send = QPushButton("发送文件…")
-        self.btn_send.clicked.connect(self._send)
+        self.btn_send.setToolTip("可多选文件；多个文件会打成 zip 再传")
+        self.btn_send.clicked.connect(self._send_files)
+        self.btn_send_folder = QPushButton("发送文件夹…", objectName="soft")
+        self.btn_send_folder.setToolTip("选择整个文件夹打包发送（zip）")
+        self.btn_send_folder.clicked.connect(self._send_folder)
         self.btn_recv = QPushButton("等待接收", objectName="soft")
         self.btn_recv.clicked.connect(self._recv)
         self.btn_stop = QPushButton("停止", objectName="danger")
         self.btn_stop.clicked.connect(self._stop)
         act.addWidget(self.btn_send)
+        act.addWidget(self.btn_send_folder)
         act.addWidget(self.btn_recv)
         act.addWidget(self.btn_stop)
         lay.addLayout(act)
@@ -220,7 +225,9 @@ class FloatingP2PBoard(QWidget):
 
         help_l = QLabel(
             "部署：在 cloudflare/ 目录执行 wrangler deploy，把输出的 *.workers.dev 填到上方。\n"
-            "正确顺序：双方同一中转 + 同一房间号 → 接收方先「等待接收」→ 发送方再「发送文件」。\n"
+            "正确顺序：双方同一中转 + 同一房间号 → 接收方先「等待接收」→ 发送方再发送。\n"
+            "「发送文件」可多选；「发送文件夹」传整个目录。多文件/文件夹会打成 zip，"
+            "对方收到后自动解压到接收目录。\n"
             "等对方超时多半是中转未开房间粘连：点「测试中转」，须 durable_rooms=true；"
             "否则请更新 cloudflare/ 后重新 wrangler deploy。"
         )
@@ -380,9 +387,8 @@ class FloatingP2PBoard(QWidget):
             on_progress=lambda a, b, c: self._bridge.progress.emit(a, b, c),
         )
 
-    def _send(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择要发送的文件")
-        if not path:
+    def _start_send(self, paths: list[str]) -> None:
+        if not paths:
             return
         sess = self._session()
         if not sess:
@@ -391,8 +397,20 @@ class FloatingP2PBoard(QWidget):
             self.session.stop()
         self.session = sess
         self.progress.setValue(0)
-        self.lbl_status.setText("准备发送…")
-        sess.send_file_async(path)
+        if len(paths) == 1:
+            self.lbl_status.setText(f"准备发送：{Path(paths[0]).name}")
+        else:
+            self.lbl_status.setText(f"准备发送 {len(paths)} 项（将打包为 zip）…")
+        sess.send_paths_async(paths)
+
+    def _send_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择要发送的文件（可多选）")
+        self._start_send(list(paths or []))
+
+    def _send_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "选择要发送的文件夹")
+        if path:
+            self._start_send([path])
 
     def _recv(self) -> None:
         dest = self.txt_dest.text().strip() or str(Path.home() / "Downloads")
