@@ -118,20 +118,36 @@ class FloatingRemoteBoard(QWidget):
         self.lbl_status.setWordWrap(True)
         lay.addWidget(self.lbl_status)
 
-        lay.addWidget(QLabel("本机 ID（给另一台电脑填）"))
+        lay.addWidget(QLabel("本机局域网 IP（同一 Wi‑Fi/有线时给对方填这个）"))
+        ip_row = QHBoxLayout()
+        self.lbl_lan_ip = QLabel("—")
+        self.lbl_lan_ip.setObjectName("idBig")
+        self.lbl_lan_ip.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_lan_ip.setToolTip("多网卡时会列出多个；优先使用排在最前的地址")
+        ip_row.addWidget(self.lbl_lan_ip, 1)
+        btn_copy_ip = QPushButton("复制 IP", objectName="soft")
+        btn_copy_ip.clicked.connect(self._copy_lan_ip)
+        ip_row.addWidget(btn_copy_ip)
+        lay.addLayout(ip_row)
+        self.lbl_lan_ip_extra = QLabel("")
+        self.lbl_lan_ip_extra.setObjectName("muted")
+        self.lbl_lan_ip_extra.setWordWrap(True)
+        lay.addWidget(self.lbl_lan_ip_extra)
+
+        lay.addWidget(QLabel("本机 ID（跨网/中继时给对方填；局域网也可只用上面的 IP）"))
         id_row = QHBoxLayout()
         self.lbl_id = QLabel("—")
         self.lbl_id.setObjectName("idBig")
         self.lbl_id.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         id_row.addWidget(self.lbl_id, 1)
-        btn_copy = QPushButton("复制", objectName="soft")
+        btn_copy = QPushButton("复制 ID", objectName="soft")
         btn_copy.clicked.connect(self._copy_id)
         id_row.addWidget(btn_copy)
         lay.addLayout(id_row)
 
         lay.addWidget(QLabel("连接到另一台（对方 ID 或局域网 IP）"))
         self.ed_peer = QLineEdit()
-        self.ed_peer.setPlaceholderText("例如 123456789  或  192.168.1.20")
+        self.ed_peer.setPlaceholderText("例如 192.168.1.20  或  123456789")
         try:
             last = self._prefs().get("rustdesk_last_peer") or ""
             if last:
@@ -163,8 +179,8 @@ class FloatingRemoteBoard(QWidget):
             "Win ↔ Mac 互控步骤：\n"
             "1. 两台都打开本软件 → 远程控制 →「启动远程引擎」\n"
             "2. 在引擎设置里设「固定密码」（或用一次性密码）\n"
-            "3. 复制本机 ID 给对方；在本页填对方 ID → 立即连接\n"
-            "4. 同一局域网也可填对方 IP\n"
+            "3. 同一局域网：把上面的「本机局域网 IP」发给对方，对方填 IP → 立即连接\n"
+            "4. 不在同一局域网：互填本机 ID 连接\n"
             "5. Mac 首次需授权「屏幕录制 / 辅助功能」\n\n"
             "说明：引擎为开源项目 RustDesk（AGPL）。\n"
             f"源码：{SOURCE_URL}\n"
@@ -176,11 +192,68 @@ class FloatingRemoteBoard(QWidget):
         lay.addStretch(1)
         root.addWidget(box)
 
+    def _lan_ips(self) -> list[str]:
+        """LAN IPs ranked for 'share with the other PC on Wi‑Fi' use."""
+        try:
+            from lan_share import local_ipv4_addresses
+
+            ips = [ip for ip in local_ipv4_addresses() if ip and not str(ip).startswith("127.")]
+        except Exception:
+            ips = []
+        if not ips:
+            return []
+
+        def score(ip: str) -> tuple:
+            parts = ip.split(".")
+            try:
+                a, b = int(parts[0]), int(parts[1])
+            except Exception:
+                return (9, ip)
+            # Deprioritize common virtual/host-only / docker adapters
+            if a == 192 and b == 56:  # VirtualBox host-only
+                return (5, ip)
+            if a == 172 and 16 <= b <= 31:  # often Docker / WSL
+                return (4, ip)
+            if a == 169:  # link-local
+                return (8, ip)
+            # Prefer typical home / office LAN
+            if a == 192 and b == 168:
+                return (0, ip)
+            if a == 10:
+                return (1, ip)  # may be VPN — still common
+            if a == 172 and 16 <= b <= 31:
+                return (2, ip)
+            return (3, ip)
+
+        return sorted(set(ips), key=score)
+
     def refresh(self) -> None:
         st = probe(self._extra_path())
         self._exe = st.exe
         self.lbl_status.setText(st.message)
         self.lbl_id.setText(st.local_id or "（启动引擎后点刷新）")
+        ips = self._lan_ips()
+        if ips:
+            self.lbl_lan_ip.setText(ips[0])
+            if len(ips) > 1:
+                self.lbl_lan_ip_extra.setText(
+                    "本机其它网卡地址：" + "  ·  ".join(ips[1:6])
+                    + (" …" if len(ips) > 6 else "")
+                    + "\n（一般选最前面的那个发给同一局域网的对方）"
+                )
+            else:
+                self.lbl_lan_ip_extra.setText("同一 Wi‑Fi / 路由器下，把这个 IP 发给对方即可。")
+        else:
+            self.lbl_lan_ip.setText("（未检测到局域网 IP）")
+            self.lbl_lan_ip_extra.setText("请确认已连接 Wi‑Fi 或有线网络后点「刷新状态」。")
+
+    def _copy_lan_ip(self) -> None:
+        text = (self.lbl_lan_ip.text() or "").strip()
+        if not text or text.startswith("（"):
+            QMessageBox.information(self, "复制", "还没有可用的局域网 IP。")
+            return
+        QGuiApplication.clipboard().setText(text)
+        self.lbl_status.setText(f"局域网 IP 已复制：{text}")
 
     def _copy_id(self) -> None:
         text = (self.lbl_id.text() or "").strip()
