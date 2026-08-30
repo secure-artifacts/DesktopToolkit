@@ -771,7 +771,7 @@ class MainWindow(QMainWindow):
         remote_w = QWidget()
         remote_l = QVBoxLayout(remote_w)
         remote_l.setContentsMargins(0, 0, 0, 0)
-        from remote_ui import FloatingRemoteBoard
+        from remote_lan_ui import FloatingRemoteBoard
 
         if not getattr(self.host, "_embed_remote", None):
             self.host._embed_remote = FloatingRemoteBoard(self.host, embedded=True)

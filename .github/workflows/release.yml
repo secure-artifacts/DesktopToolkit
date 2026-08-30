@@ -140,9 +140,12 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.resolve.outputs.version }}"
-          chmod +x build_mac.sh
-          # Prefer script; fall back to inline if needed
-          ./build_mac.sh
+          chmod +x build_macos.sh build_mac.sh 2>/dev/null || true
+          if [[ -f build_macos.sh ]]; then
+            ./build_macos.sh
+          else
+            ./build_mac.sh
+          fi
           mkdir -p release-assets
           ZIP="dist/release/DesktopToolkit-${VERSION}-macos.zip"
           DMG="dist/release/DesktopToolkit-${VERSION}-macos.dmg"

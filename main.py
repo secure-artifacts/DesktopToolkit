@@ -494,7 +494,7 @@ class ToolkitApp(QObject):
                 return
         except Exception:
             pass
-        from remote_ui import FloatingRemoteBoard
+        from remote_lan_ui import FloatingRemoteBoard
 
         if self.remote_board is None:
             self.remote_board = FloatingRemoteBoard(self)
